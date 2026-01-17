@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import {
   X,
   ChevronLeft,
   ChevronRight,
+  Loader2,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { toast } from "sonner";
@@ -43,8 +44,75 @@ const formatFileSize = (bytes: number): string => {
 export const AudioView: React.FC<AudioViewProps> = ({ dataFiles, onDelete }) => {
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [selectedAudio, setSelectedAudio] = useState<number | null>(null);
+  const [loadedPreviews, setLoadedPreviews] = useState<Map<number, string>>(new Map());
+  const [loadingPreviews, setLoadingPreviews] = useState<Set<number>>(new Set());
   const audioRefs = useRef<{ [key: string]: HTMLAudioElement | null }>({});
   const dialogAudioRef = useRef<HTMLAudioElement>(null);
+
+  // Load preview on-demand for audio files without preview
+  const loadPreview = async (file: DataFile, index: number) => {
+    // If already loaded, return
+    if (loadedPreviews.has(index)) {
+      return loadedPreviews.get(index);
+    }
+
+    // If preview exists in file, use it
+    if (file.preview && file.preview.length > 0) {
+      setLoadedPreviews(prev => new Map(prev).set(index, file.preview!));
+      return file.preview;
+    }
+
+    // Load from API
+    setLoadingPreviews(prev => new Set(prev).add(index));
+    try {
+      const response = await fetch(`/api/submissions/${file.id}/preview`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.preview) {
+          setLoadedPreviews(prev => new Map(prev).set(index, data.preview));
+          return data.preview;
+        }
+      }
+      throw new Error('Preview not available');
+    } catch (error) {
+      console.error(`Error loading preview for ${file.fileName}:`, error);
+      return null;
+    } finally {
+      setLoadingPreviews(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(index);
+        return newSet;
+      });
+    }
+  };
+
+  // Don't load all previews at once - only load on demand
+
+  // Load preview immediately when audio is selected in dialog
+  useEffect(() => {
+    if (selectedAudio !== null) {
+      const file = dataFiles[selectedAudio];
+      const audioUrl = getAudioUrl(file, selectedAudio);
+      if (!audioUrl && !loadingPreviews.has(selectedAudio)) {
+        loadPreview(file, selectedAudio).catch(() => {
+          toast.error('Failed to load audio preview');
+        });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAudio]);
+
+  const getAudioUrl = (file: DataFile, index: number) => {
+    // Check loaded previews first
+    if (loadedPreviews.has(index)) {
+      return loadedPreviews.get(index)!;
+    }
+    // If preview exists in file, use it
+    if (file.preview && file.preview.length > 0) {
+      return file.preview;
+    }
+    return null;
+  };
 
   if (!dataFiles || dataFiles.length === 0) {
     return (
@@ -57,33 +125,52 @@ export const AudioView: React.FC<AudioViewProps> = ({ dataFiles, onDelete }) => 
     );
   }
 
-  const handlePlayPause = (file: DataFile) => {
+  const handlePlayPause = async (file: DataFile, index: number) => {
+    const audioUrl = getAudioUrl(file, index);
+    if (!audioUrl) {
+      // Try to load preview first
+      const preview = await loadPreview(file, index);
+      if (!preview) {
+        toast.error('Audio preview not available');
+        return;
+      }
+    }
+
     const audio = audioRefs.current[file.id];
+    const finalUrl = audioUrl || loadedPreviews.get(index) || file.preview;
     
-    if (!audio) {
+    if (!audio && finalUrl) {
       // Create audio element if it doesn't exist
-      const newAudio = new Audio(file.preview || '');
+      const newAudio = new Audio(finalUrl);
       audioRefs.current[file.id] = newAudio;
       
       newAudio.addEventListener('ended', () => {
         setPlayingId(null);
       });
       
-      newAudio.play();
+      newAudio.play().catch((error) => {
+        console.error('Error playing audio:', error);
+        toast.error('Failed to play audio');
+      });
       setPlayingId(file.id);
       return;
     }
 
-    if (playingId === file.id) {
-      audio.pause();
-      setPlayingId(null);
-    } else {
-      // Pause all other audio
-      Object.values(audioRefs.current).forEach(a => {
-        if (a && a !== audio) a.pause();
-      });
-      audio.play();
-      setPlayingId(file.id);
+    if (audio) {
+      if (playingId === file.id) {
+        audio.pause();
+        setPlayingId(null);
+      } else {
+        // Pause all other audio
+        Object.values(audioRefs.current).forEach(a => {
+          if (a && a !== audio) a.pause();
+        });
+        audio.play().catch((error) => {
+          console.error('Error playing audio:', error);
+          toast.error('Failed to play audio');
+        });
+        setPlayingId(file.id);
+      }
     }
   };
 
@@ -199,15 +286,18 @@ export const AudioView: React.FC<AudioViewProps> = ({ dataFiles, onDelete }) => 
                     </Button>
                   )}
                 </div>
-                {file.preview && (
-                  <audio
-                    ref={(el) => {
-                      audioRefs.current[file.id] = el;
-                    }}
-                    src={file.preview}
-                    className="hidden"
-                  />
-                )}
+                {(() => {
+                  const audioUrl = getAudioUrl(file, dataFiles.indexOf(file));
+                  return audioUrl ? (
+                    <audio
+                      ref={(el) => {
+                        audioRefs.current[file.id] = el;
+                      }}
+                      src={audioUrl}
+                      className="hidden"
+                    />
+                  ) : null;
+                })()}
               </CardContent>
             </Card>
           ))}
@@ -313,17 +403,42 @@ export const AudioView: React.FC<AudioViewProps> = ({ dataFiles, onDelete }) => 
                   </Button>
                 </div>
 
-                {dataFiles[selectedAudio].preview && (
-                  <audio
-                    ref={dialogAudioRef}
-                    src={dataFiles[selectedAudio].preview}
-                    className="w-full mt-4"
-                    controls
-                    onPlay={() => setPlayingId(dataFiles[selectedAudio].id)}
-                    onPause={() => setPlayingId(null)}
-                    onEnded={() => setPlayingId(null)}
-                  />
-                )}
+                {(() => {
+                  const file = dataFiles[selectedAudio];
+                  const audioUrl = getAudioUrl(file, selectedAudio);
+                  
+                  if (loadingPreviews.has(selectedAudio)) {
+                    return (
+                      <div className="w-full mt-4 flex items-center justify-center p-8 bg-slate-800/50 rounded-lg">
+                        <Loader2 className="h-8 w-8 text-white animate-spin" />
+                      </div>
+                    );
+                  }
+                  
+                  if (audioUrl) {
+                    return (
+                      <audio
+                        ref={dialogAudioRef}
+                        src={audioUrl}
+                        className="w-full mt-4"
+                        controls
+                        muted={false}
+                        onPlay={() => setPlayingId(file.id)}
+                        onPause={() => setPlayingId(null)}
+                        onEnded={() => setPlayingId(null)}
+                        onError={() => {
+                          toast.error('Failed to load audio file');
+                        }}
+                      />
+                    );
+                  }
+                  
+                  return (
+                    <div className="w-full mt-4 p-4 bg-slate-800/50 rounded-lg text-center">
+                      <p className="text-slate-400 text-sm">Audio preview not available</p>
+                    </div>
+                  );
+                })()}
 
                 <div className="mt-6 text-center">
                   <p className="text-slate-400 text-sm">

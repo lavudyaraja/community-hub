@@ -7,4 +7,5 @@ export * from './videos';
 export * from './audio';
 export * from './web-data';
 export * from './admins';
+export * from './notifications';
 export { runMigrations } from './migrations';

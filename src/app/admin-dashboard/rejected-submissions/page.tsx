@@ -123,7 +123,7 @@ const RejectedSubmissions = () => {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => router.push(`/dashboard/dataset-preview?id=${submission.id}`)}
+                        onClick={() => router.push(`/admin-dashboard/rejected-submissions/${submission.id}`)}
                       >
                         <Eye className="h-4 w-4 mr-2" />
                         View Details

@@ -10,6 +10,8 @@ import {
   X,
   Trash2,
   AlertCircle,
+  Loader2,
+  RefreshCw,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { toast } from "sonner";
@@ -38,18 +40,93 @@ const formatFileSize = (bytes: number): string => {
   return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
 };
 
+// Format preview data as proper data URL
+const formatPreviewData = (preview: string | undefined, mimeType?: string): string | null => {
+  if (!preview || preview.length === 0) {
+    return null;
+  }
+
+  // If already a data URL, return as is
+  if (preview.startsWith('data:') || preview.startsWith('blob:') || preview.startsWith('http')) {
+    return preview;
+  }
+
+  // If it's base64, format it as data URL
+  const base64Pattern = /^[A-Za-z0-9+/=\s]+$/;
+  const cleanData = preview.replace(/\s/g, '');
+  
+  if (base64Pattern.test(cleanData)) {
+    const mime = mimeType || 'video/mp4';
+    return `data:${mime};base64,${cleanData}`;
+  }
+
+  // Default: assume it's base64 and format it
+  const defaultMime = mimeType || 'video/mp4';
+  return `data:${defaultMime};base64,${cleanData}`;
+};
+
 export const VideoView: React.FC<VideoViewProps> = ({ dataFiles, onDelete }) => {
   const [selectedVideo, setSelectedVideo] = useState<number | null>(null);
   const [videoErrors, setVideoErrors] = useState<Set<number>>(new Set());
+  const [loadedPreviews, setLoadedPreviews] = useState<Map<number, string>>(new Map());
+  const [loadingPreviews, setLoadingPreviews] = useState<Set<number>>(new Set());
   const videoRef = useRef<HTMLVideoElement>(null);
 
   // Video URL valid aa kada ani check chese function
-  const isValidVideo = (file: DataFile) => {
-    if (!file.preview || file.preview.length === 0) {
+  const isValidVideo = (preview: string | null | undefined) => {
+    if (!preview || preview.length === 0) {
       return false;
     }
-    // Check if it's a valid data URL for video
-    return file.preview.startsWith('data:video/') || file.preview.startsWith('blob:');
+    // Check if it's a valid data URL for video or blob URL
+    return preview.startsWith('data:video/') || 
+           preview.startsWith('data:') || 
+           preview.startsWith('blob:') ||
+           preview.startsWith('http');
+  };
+
+  // Load preview data on-demand
+  const loadPreview = async (file: DataFile, index: number) => {
+    // If already loaded, return
+    if (loadedPreviews.has(index)) {
+      return loadedPreviews.get(index);
+    }
+
+    // If preview exists in file, format it
+    if (file.preview) {
+      const formatted = formatPreviewData(file.preview);
+      if (formatted && isValidVideo(formatted)) {
+        setLoadedPreviews(prev => new Map(prev).set(index, formatted));
+        return formatted;
+      }
+    }
+
+    // Load from API
+    setLoadingPreviews(prev => new Set(prev).add(index));
+    try {
+      const response = await fetch(`/api/submissions/${file.id}/preview`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.preview) {
+          const formatted = formatPreviewData(data.preview, data.mime_type);
+          if (formatted && isValidVideo(formatted)) {
+            setLoadedPreviews(prev => new Map(prev).set(index, formatted));
+            return formatted;
+          }
+        }
+      }
+      throw new Error('Preview not available');
+    } catch (error) {
+      console.error(`Error loading preview for ${file.fileName}:`, error);
+      setVideoErrors(prev => new Set(prev).add(index));
+      toast.error(`Failed to load preview for ${file.fileName}`);
+      return null;
+    } finally {
+      setLoadingPreviews(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(index);
+        return newSet;
+      });
+    }
   };
 
   const handleDelete = (id: string, e: React.MouseEvent) => {
@@ -60,26 +137,53 @@ export const VideoView: React.FC<VideoViewProps> = ({ dataFiles, onDelete }) => 
     }
   };
 
-  // Handle video play when dialog opens
+  // Handle video selection and load preview
+  const handleVideoClick = async (index: number) => {
+    const file = dataFiles[index];
+    
+    // Open dialog immediately for better UX
+    setSelectedVideo(index);
+    
+    // Load preview in background if not already loaded
+    if (!loadedPreviews.has(index) && !loadingPreviews.has(index)) {
+      // Don't await - load in background
+      loadPreview(file, index).catch(error => {
+        console.error('Error loading preview:', error);
+      });
+    }
+  };
+
+  // Handle video play when dialog opens and preview is loaded
   useEffect(() => {
     if (selectedVideo !== null && videoRef.current) {
       const video = videoRef.current;
+      const previewUrl = loadedPreviews.get(selectedVideo) || formatPreviewData(dataFiles[selectedVideo]?.preview);
       
-      // Reset video state
-      video.currentTime = 0;
-      video.muted = false; // Enable sound
-      
-      // Try to play - user clicked to open dialog, so this should work
-      const playPromise = video.play();
-      
-      if (playPromise !== undefined) {
-        playPromise.catch((error) => {
-          // Autoplay might be prevented, but user can click play button
-          console.log('Autoplay prevented:', error);
-        });
+      if (previewUrl && isValidVideo(previewUrl)) {
+        // Update source if needed
+        if (video.src !== previewUrl) {
+          video.src = previewUrl;
+        }
+        
+        // Reset video state and enable sound
+        video.currentTime = 0;
+        video.muted = false;
+        video.volume = 1.0;
+        
+        // Try to play - user clicked to open dialog, so this should work
+        const playPromise = video.play();
+        
+        if (playPromise !== undefined) {
+          playPromise.catch((error) => {
+            // Autoplay might be prevented, but user can click play button
+            console.log('Autoplay prevented:', error);
+          });
+        }
       }
     }
-  }, [selectedVideo]);
+  }, [selectedVideo, loadedPreviews, dataFiles]);
+
+  // Don't preload all videos - only load on demand (on hover or click)
 
   if (!dataFiles || dataFiles.length === 0) {
     return (
@@ -106,74 +210,99 @@ export const VideoView: React.FC<VideoViewProps> = ({ dataFiles, onDelete }) => 
         </CardHeader>
         <CardContent className="p-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-            {dataFiles.map((file, index) => (
-              <Card
-                key={file.id}
-                className="overflow-hidden border border-slate-200 hover:border-purple-400 transition-all bg-white group shadow-sm"
-              >
-                <div 
-                  className="relative aspect-video bg-slate-900 cursor-pointer"
-                  onClick={() => setSelectedVideo(index)}
+            {dataFiles.map((file, index) => {
+              const previewUrl = loadedPreviews.get(index) || formatPreviewData(file.preview);
+              const hasValidPreview = isValidVideo(previewUrl);
+              const isLoading = loadingPreviews.has(index);
+              
+              return (
+                <Card
+                  key={file.id}
+                  className="overflow-hidden border border-slate-200 hover:border-purple-400 transition-all bg-white group shadow-sm"
                 >
-                  {isValidVideo(file) && !videoErrors.has(index) ? (
-                    <video
-                      key={`thumbnail-${file.id}`}
-                      src={file.preview}
-                      className="w-full h-full object-cover"
-                      preload="metadata"
-                      muted
-                      playsInline
-                      loop
-                      onError={() => {
-                        setVideoErrors(prev => {
-                          const newSet = new Set(prev);
-                          newSet.add(index);
-                          return newSet;
-                        });
-                      }}
-                    />
-                  ) : (
-                    <div className="w-full h-full flex flex-col items-center justify-center bg-slate-100">
-                      <VideoIcon className="h-12 w-12 text-slate-300 mb-2" />
-                      <span className="text-[10px] text-slate-400">
-                        {videoErrors.has(index) ? 'Video load failed' : 'Preview not available'}
-                      </span>
-                    </div>
-                  )}
+                  <div 
+                    className="relative aspect-video bg-slate-900 cursor-pointer"
+                    onClick={() => handleVideoClick(index)}
+                    onMouseEnter={() => {
+                      // Load preview on hover if not already loaded
+                      if (!file.preview && !loadedPreviews.has(index) && !loadingPreviews.has(index)) {
+                        loadPreview(file, index).catch(() => {});
+                      }
+                    }}
+                  >
+                    {isLoading ? (
+                      <div className="w-full h-full flex flex-col items-center justify-center bg-slate-100">
+                        <Loader2 className="h-8 w-8 text-purple-600 animate-spin mb-2" />
+                        <span className="text-[10px] text-slate-400">Loading preview...</span>
+                      </div>
+                    ) : hasValidPreview && !videoErrors.has(index) && previewUrl ? (
+                      <video
+                        key={`thumbnail-${file.id}-${index}`}
+                        src={previewUrl}
+                        className="w-full h-full object-cover"
+                        preload="metadata"
+                        muted
+                        playsInline
+                        loop
+                        onError={() => {
+                          setVideoErrors(prev => {
+                            const newSet = new Set(prev);
+                            newSet.add(index);
+                            return newSet;
+                          });
+                        }}
+                        onLoadedData={() => {
+                          // Preview loaded successfully
+                          setVideoErrors(prev => {
+                            const newSet = new Set(prev);
+                            newSet.delete(index);
+                            return newSet;
+                          });
+                        }}
+                      />
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center bg-slate-100">
+                        <VideoIcon className="h-12 w-12 text-slate-300 mb-2" />
+                        <span className="text-[10px] text-slate-400">
+                          {videoErrors.has(index) ? 'Video load failed' : 'Click to load preview'}
+                        </span>
+                      </div>
+                    )}
                   
-                  {/* Overlay Play Button */}
-                  <div className="absolute inset-0 bg-black/20 group-hover:bg-black/40 transition-all flex items-center justify-center">
-                    <div className="h-14 w-14 rounded-full bg-white/90 flex items-center justify-center shadow-xl group-hover:scale-110 transition-transform">
-                      <Play className="h-6 w-6 text-slate-900 fill-slate-900 ml-1" />
+                    {/* Overlay Play Button */}
+                    <div className="absolute inset-0 bg-black/20 group-hover:bg-black/40 transition-all flex items-center justify-center">
+                      <div className="h-14 w-14 rounded-full bg-white/90 flex items-center justify-center shadow-xl group-hover:scale-110 transition-transform">
+                        <Play className="h-6 w-6 text-slate-900 fill-slate-900 ml-1" />
+                      </div>
                     </div>
+
+                    <Badge className="absolute top-3 right-3 bg-black/60 text-white border-0 backdrop-blur-sm">
+                      {formatFileSize(file.fileSize)}
+                    </Badge>
+
+                    {onDelete && (
+                      <Button
+                        variant="destructive"
+                        size="icon"
+                        className="absolute top-3 left-3 h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity shadow-lg"
+                        onClick={(e) => handleDelete(file.id, e)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    )}
                   </div>
-
-                  <Badge className="absolute top-3 right-3 bg-black/60 text-white border-0 backdrop-blur-sm">
-                    {formatFileSize(file.fileSize)}
-                  </Badge>
-
-                  {onDelete && (
-                    <Button
-                      variant="destructive"
-                      size="icon"
-                      className="absolute top-3 left-3 h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity shadow-lg"
-                      onClick={(e) => handleDelete(file.id, e)}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  )}
-                </div>
-                
-                <CardContent className="p-4">
-                  <p className="text-sm font-semibold text-slate-800 truncate" title={file.fileName}>
-                    {file.fileName}
-                  </p>
-                  <p className="text-xs text-slate-500 mt-1">
-                    {new Date(file.date).toLocaleDateString()}
-                  </p>
-                </CardContent>
-              </Card>
-            ))}
+                  
+                  <CardContent className="p-4">
+                    <p className="text-sm font-semibold text-slate-800 truncate" title={file.fileName}>
+                      {file.fileName}
+                    </p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      {new Date(file.date).toLocaleDateString()}
+                    </p>
+                  </CardContent>
+                </Card>
+              );
+            })}
           </div>
         </CardContent>
       </Card>
@@ -204,37 +333,79 @@ export const VideoView: React.FC<VideoViewProps> = ({ dataFiles, onDelete }) => 
 
               {/* Player Area */}
               <div className="w-full aspect-video flex items-center justify-center bg-black">
-                {isValidVideo(dataFiles[selectedVideo]) && !videoErrors.has(selectedVideo) ? (
-                  <video
-                    key={`player-${dataFiles[selectedVideo].id}`}
-                    ref={videoRef}
-                    src={dataFiles[selectedVideo].preview}
-                    className="w-full h-full max-h-[85vh]"
-                    controls
-                    playsInline
-                    preload="auto"
-                    onError={() => {
-                      setVideoErrors(prev => {
-                        const newSet = new Set(prev);
-                        newSet.add(selectedVideo);
-                        return newSet;
-                      });
-                    }}
-                  />
-                ) : (
-                  <div className="text-center text-slate-400 p-8">
-                    <AlertCircle className="h-12 w-12 mx-auto mb-4 text-red-500" />
-                    <p className="text-lg font-medium mb-2">Video cannot be played</p>
-                    <p className="text-sm text-slate-500">
-                      {!isValidVideo(dataFiles[selectedVideo]) 
-                        ? 'Video preview data is missing or invalid.' 
-                        : 'The video file may be corrupted or in an unsupported format.'}
-                    </p>
-                    <p className="text-xs text-slate-600 mt-2">
-                      File: {dataFiles[selectedVideo].fileName}
-                    </p>
-                  </div>
-                )}
+                {(() => {
+                  const file = dataFiles[selectedVideo];
+                  const previewUrl = loadedPreviews.get(selectedVideo) || formatPreviewData(file.preview);
+                  const hasValidPreview = isValidVideo(previewUrl);
+                  const isLoading = loadingPreviews.has(selectedVideo);
+                  
+                  if (isLoading) {
+                    return (
+                      <div className="text-center text-slate-400 p-8">
+                        <Loader2 className="h-12 w-12 mx-auto mb-4 text-purple-600 animate-spin" />
+                        <p className="text-lg font-medium mb-2">Loading video...</p>
+                        <p className="text-sm text-slate-500">Please wait while we load the video preview</p>
+                      </div>
+                    );
+                  }
+                  
+                  if (hasValidPreview && !videoErrors.has(selectedVideo) && previewUrl) {
+                    return (
+                      <video
+                        key={`player-${file.id}-${selectedVideo}`}
+                        ref={videoRef}
+                        src={previewUrl}
+                        className="w-full h-full max-h-[85vh]"
+                        controls
+                        playsInline
+                        preload="auto"
+                        muted={false}
+                        onError={(e) => {
+                          console.error('Video playback error:', e);
+                          setVideoErrors(prev => {
+                            const newSet = new Set(prev);
+                            newSet.add(selectedVideo);
+                            return newSet;
+                          });
+                          toast.error('Failed to play video. The file may be corrupted or in an unsupported format.');
+                        }}
+                        onLoadedData={() => {
+                          // Video loaded successfully - ensure sound is enabled
+                          if (videoRef.current) {
+                            videoRef.current.muted = false;
+                            videoRef.current.volume = 1.0;
+                          }
+                        }}
+                      />
+                    );
+                  }
+                  
+                  return (
+                    <div className="text-center text-slate-400 p-8">
+                      <AlertCircle className="h-12 w-12 mx-auto mb-4 text-red-500" />
+                      <p className="text-lg font-medium mb-2">Video cannot be played</p>
+                      <p className="text-sm text-slate-500">
+                        {!hasValidPreview 
+                          ? 'Video preview data is missing or invalid.' 
+                          : 'The video file may be corrupted or in an unsupported format.'}
+                      </p>
+                      <p className="text-xs text-slate-600 mt-2">
+                        File: {file.fileName}
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="mt-4 text-white border-white/30 hover:bg-white/10"
+                        onClick={async () => {
+                          await loadPreview(file, selectedVideo);
+                        }}
+                      >
+                        <RefreshCw className="h-4 w-4 mr-2" />
+                        Retry Loading
+                      </Button>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           )}

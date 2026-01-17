@@ -1,26 +1,17 @@
 "use client";
 
-import React, { useState, useEffect, Suspense } from 'react';
+import React, { useState, useEffect, Suspense, useCallback } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { AdminSidebar } from '../components/sidebar';
 import { getCurrentAdmin, isAdminAuthenticated } from '@/lib/auth';
 import { 
   Shield, 
-  Brain, 
-  UserSearch, 
-  FlaskConical, 
-  BarChart3, 
   Search, 
-  Bell, 
-  Settings, 
   ChevronRight, 
   CheckCircle2, 
-  Play, 
-  Rocket, 
-  AlertTriangle,
+  AlertCircle,
   TrendingUp,
   Filter,
-  Maximize2,
   Download,
   Upload,
   RefreshCw,
@@ -30,7 +21,17 @@ import {
   Image as ImageIcon,
   Music,
   Video,
-  Trash2
+  Trash2,
+  Clock,
+  CheckSquare,
+  XSquare,
+  MoreVertical,
+  SortAsc,
+  Loader2,
+  Grid3x3,
+  List,
+  Calendar,
+  Send
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -38,11 +39,17 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
+import { RejectionDialog } from '@/components/admin/rejection-dialog';
 
 // Types
 interface DataFile {
@@ -50,56 +57,58 @@ interface DataFile {
   name: string;
   type: 'image' | 'audio' | 'video' | 'document';
   status: 'scanning' | 'anomaly' | 'queued' | 'approved' | 'rejected';
-  matchScore?: number;
-  anomalyType?: string;
-  duration?: string;
-  codec?: string;
+  size?: number;
+  uploadedAt?: string;
   thumbnail: string;
+  selected?: boolean;
 }
 
 interface Metrics {
-  nodeStatus: number;
-  activeNodes: number;
-  latency: number;
-  anomalies: number;
-  consistencyScore: number;
-  scoreChange: number;
+  totalFiles: number;
+  approved: number;
+  rejected: number;
+  pending: number;
+  successRate: number;
 }
+
 
 // Main Component
 function ValidationHubContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const submissionId = searchParams.get('submissionId');
+  const isBulk = searchParams.get('bulk') === 'true';
+  const bulkCount = parseInt(searchParams.get('count') || '0');
   const [admin, setAdmin] = useState<any>(null);
   
-  const [validationStrategy, setValidationStrategy] = useState<'automated' | 'manual'>('automated');
-  const [isValidatingSubmission, setIsValidatingSubmission] = useState(false);
+  const [validationMode, setValidationMode] = useState<'auto' | 'manual'>('auto');
+  const [isValidating, setIsValidating] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [submissionData, setSubmissionData] = useState<any>(null);
-  const [showValidationMode, setShowValidationMode] = useState(false);
   const [dataFiles, setDataFiles] = useState<DataFile[]>([]);
-
+  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  const [bulkSubmissionIds, setBulkSubmissionIds] = useState<string[]>([]);
+  const [currentBulkIndex, setCurrentBulkIndex] = useState(0);
+  
   const [metrics, setMetrics] = useState<Metrics>({
-    nodeStatus: 100,
-    activeNodes: 8,
-    latency: 124,
-    anomalies: 3,
-    consistencyScore: 98.4,
-    scoreChange: 0.2
+    totalFiles: 0,
+    approved: 0,
+    rejected: 0,
+    pending: 0,
+    successRate: 0
   });
 
-  const [logs, setLogs] = useState([
-    { time: '14:22:10', message: 'Initializing node-cluster-alpha...', type: 'info' },
-    { time: '14:22:12', message: 'Scanning satellite_ingest_001.jpg', type: 'info' },
-    { time: '14:22:15', message: 'WARNING: Audio freq spike in beta.wav', type: 'warning' },
-    { time: '14:22:18', message: 'Waiting for operator review...', type: 'info' }
-  ]);
-
-  const [showUploadModal, setShowUploadModal] = useState(false);
-  const [selectedFile, setSelectedFile] = useState<DataFile | null>(null);
+  const [showPreviewModal, setShowPreviewModal] = useState(false);
+  const [previewFile, setPreviewFile] = useState<DataFile | null>(null);
   const [filterType, setFilterType] = useState<'all' | 'image' | 'audio' | 'video' | 'document'>('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [sortBy, setSortBy] = useState<'name' | 'date' | 'status'>('date');
+  
+  // Rejection dialog state
+  const [showRejectDialog, setShowRejectDialog] = useState(false);
+  const [rejectingFileId, setRejectingFileId] = useState<string | null>(null);
+  
 
   // Check admin authentication
   useEffect(() => {
@@ -117,53 +126,310 @@ function ValidationHubContent() {
     setAdmin(currentAdmin);
   }, [router]);
 
-  // Load submission data if submissionId is present
-  useEffect(() => {
-    if (submissionId) {
-      loadSubmissionData();
-      setShowValidationMode(true);
+  // Load submission data - memoized function
+  const loadSubmissionData = useCallback(async () => {
+    if (!submissionId) {
+      console.log('No submissionId provided');
+      return;
     }
-  }, [submissionId]);
-
-  const loadSubmissionData = async () => {
-    if (!submissionId) return;
     
+    setIsLoading(true);
+    console.log('Fetching submission data for:', submissionId);
     try {
       const response = await fetch(`/api/submissions/${submissionId}`);
+      console.log('Submission API response:', response.status, response.ok);
       if (response.ok) {
         const data = await response.json();
+        console.log('Submission data loaded:', data);
         setSubmissionData(data);
         
-        // Convert submission to DataFile format and add to dataFiles
+        // Try to load preview if not present
+        let preview = data.preview || '';
+        if (!preview) {
+          try {
+            const previewResponse = await fetch(`/api/submissions/${submissionId}/preview`);
+            if (previewResponse.ok) {
+              const previewData = await previewResponse.json();
+              preview = previewData.preview || '';
+              
+              // Validate video preview format
+              if (data.file_type === 'video' && preview) {
+                // Ensure it's a valid data URL or blob URL
+                if (!preview.startsWith('data:') && !preview.startsWith('blob:') && !preview.startsWith('http')) {
+                  // Try to format as data URL
+                  const mimeType = data.mime_type || 'video/mp4';
+                  preview = `data:${mimeType};base64,${preview}`;
+                }
+              }
+            }
+          } catch (error) {
+            console.error('Error loading preview:', error);
+          }
+        } else if (data.file_type === 'video' && preview && !preview.startsWith('data:') && !preview.startsWith('blob:')) {
+          // Format existing preview if it's not already a data URL
+          const mimeType = data.mime_type || 'video/mp4';
+          preview = `data:${mimeType};base64,${preview}`;
+        }
+        
+        // Map database status to UI status
+        const mapStatus = (dbStatus: string): 'scanning' | 'anomaly' | 'queued' | 'approved' | 'rejected' => {
+          if (dbStatus === 'validated' || dbStatus === 'successful') return 'approved';
+          if (dbStatus === 'rejected' || dbStatus === 'failed') return 'rejected';
+          if (dbStatus === 'submitted') return 'queued';
+          return 'scanning';
+        };
+
         const fileData: DataFile = {
           id: data.id,
           name: data.file_name || data.fileName || 'Unknown',
-          type: data.file_type || data.fileType || 'document',
-          status: 'scanning',
-          thumbnail: data.preview || '',
+          type: (data.file_type || data.fileType || 'document') as 'image' | 'audio' | 'video' | 'document',
+          status: mapStatus(data.status || 'pending'),
+          size: data.file_size || data.fileSize,
+          uploadedAt: data.created_at || new Date().toISOString(),
+          thumbnail: preview,
         };
         
         setDataFiles([fileData]);
+        toast.success('Submission loaded successfully');
       } else {
-        toast.error('Failed to load submission data');
+        const errorData = await response.json().catch(() => ({}));
+        console.error('Failed to load submission:', errorData);
+        toast.error(errorData.error || 'Failed to load submission data');
       }
     } catch (error) {
       console.error('Error loading submission:', error);
       toast.error('Error loading submission data');
+    } finally {
+      setIsLoading(false);
     }
-  };
+  }, [submissionId]);
 
-  const handleValidationModeSelect = async (mode: 'automated' | 'manual') => {
-    if (!submissionId || !submissionData) return;
-    
-    setIsValidatingSubmission(true);
-    setValidationStrategy(mode);
+  // Load bulk submission IDs from sessionStorage if in bulk mode
+  const loadBulkSubmissions = useCallback(async (ids: string[]) => {
+    try {
+      // Load submission data
+      const submissionPromises = ids.map(id => 
+        fetch(`/api/submissions/${id}`).then(res => res.ok ? res.json() : null)
+      );
+      
+      const submissions = await Promise.all(submissionPromises);
+      const validSubmissions = submissions.filter(s => s !== null);
+      
+      // Load previews for each submission
+      const filesDataPromises = validSubmissions.map(async (data: any) => {
+        let preview = data.preview || '';
+        
+        // If no preview in submission data, try to fetch it
+        if (!preview) {
+          try {
+            const previewResponse = await fetch(`/api/submissions/${data.id}/preview`);
+            if (previewResponse.ok) {
+              const previewData = await previewResponse.json();
+              preview = previewData.preview || '';
+              
+              // Validate video preview format
+              if (data.file_type === 'video' && preview) {
+                // Ensure it's a valid data URL or blob URL
+                if (!preview.startsWith('data:') && !preview.startsWith('blob:') && !preview.startsWith('http')) {
+                  // Try to format as data URL
+                  const mimeType = data.mime_type || 'video/mp4';
+                  preview = `data:${mimeType};base64,${preview}`;
+                }
+              }
+            }
+          } catch (error) {
+            console.error(`Error loading preview for ${data.id}:`, error);
+          }
+        } else if (data.file_type === 'video' && preview && !preview.startsWith('data:') && !preview.startsWith('blob:')) {
+          // Format existing preview if it's not already a data URL
+          const mimeType = data.mime_type || 'video/mp4';
+          preview = `data:${mimeType};base64,${preview}`;
+        }
+        
+        // Map database status to UI status
+        const mapStatus = (dbStatus: string): 'scanning' | 'anomaly' | 'queued' | 'approved' | 'rejected' => {
+          if (dbStatus === 'validated' || dbStatus === 'successful') return 'approved';
+          if (dbStatus === 'rejected' || dbStatus === 'failed') return 'rejected';
+          if (dbStatus === 'submitted') return 'queued';
+          return 'scanning';
+        };
+
+        return {
+          id: data.id,
+          name: data.file_name || data.fileName || 'Unknown',
+          type: (data.file_type || data.fileType || 'document') as 'image' | 'audio' | 'video' | 'document',
+          status: mapStatus(data.status || 'pending'),
+          size: data.file_size || data.fileSize,
+          uploadedAt: data.created_at || new Date().toISOString(),
+          thumbnail: preview,
+        };
+      });
+      
+      const filesData = await Promise.all(filesDataPromises);
+      setDataFiles(filesData);
+      
+      if (validSubmissions.length > 0) {
+        setSubmissionData(validSubmissions[0]); // Set first as primary
+      }
+      
+      if (validSubmissions.length < ids.length) {
+        toast.warning(`Loaded ${validSubmissions.length} of ${ids.length} submissions`);
+      } else {
+        toast.success(`Loaded ${validSubmissions.length} submission(s) for validation`);
+      }
+    } catch (error) {
+      console.error('Error loading bulk submissions:', error);
+      toast.error('Error loading submissions');
+    }
+  }, []);
+
+  // Load bulk submission IDs from database if in bulk mode
+  useEffect(() => {
+    if (isBulk && admin?.email) {
+      const loadFromDatabase = async () => {
+        try {
+          const response = await fetch(`/api/validation-queue?adminEmail=${encodeURIComponent(admin.email)}`);
+          if (response.ok) {
+            const queueItems = await response.json();
+            const ids = queueItems.map((item: any) => item.submission_id);
+            if (ids.length > 0) {
+              setBulkSubmissionIds(ids);
+              loadBulkSubmissions(ids);
+            } else {
+              toast.warning('No submissions found in validation queue');
+            }
+          } else {
+            console.error('Failed to load validation queue');
+            toast.error('Failed to load validation queue');
+          }
+        } catch (error) {
+          console.error('Error loading validation queue:', error);
+          toast.error('Error loading validation queue');
+        }
+      };
+      loadFromDatabase();
+    }
+  }, [isBulk, admin, loadBulkSubmissions]);
+
+  // Load submission data if submissionId is present or load from validation queue
+  useEffect(() => {
+    console.log('Validation Hub - submissionId:', submissionId, 'isBulk:', isBulk);
+    if (submissionId && !isBulk) {
+      console.log('Loading single submission:', submissionId);
+      // Add to validation queue if not already there
+      if (admin?.email) {
+        fetch('/api/validation-queue', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            submissionId: submissionId,
+            adminEmail: admin.email
+          })
+        }).catch(err => console.warn('Failed to add to queue:', err));
+      }
+      loadSubmissionData();
+    } else if (isBulk) {
+      console.log('Bulk mode detected, loading from database');
+    } else if (!submissionId && admin?.email) {
+      // Load all pending items from validation queue if no submissionId
+      const loadQueue = async () => {
+        try {
+          const response = await fetch(`/api/validation-queue?adminEmail=${encodeURIComponent(admin.email)}`);
+          if (response.ok) {
+            const queueItems = await response.json();
+            if (queueItems.length > 0) {
+              const ids = queueItems.map((item: any) => item.submission_id);
+              setBulkSubmissionIds(ids);
+              loadBulkSubmissions(ids);
+            }
+          }
+        } catch (error) {
+          console.error('Error loading validation queue:', error);
+        }
+      };
+      loadQueue();
+    }
+  }, [submissionId, isBulk, loadSubmissionData, admin]);
+
+  // Update metrics whenever dataFiles changes
+  useEffect(() => {
+    const totalFiles = dataFiles.length;
+    const approved = dataFiles.filter(f => f.status === 'approved').length;
+    const rejected = dataFiles.filter(f => f.status === 'rejected').length;
+    const pending = dataFiles.filter(f => !['approved', 'rejected'].includes(f.status)).length;
+    const successRate = totalFiles > 0 ? Math.round((approved / totalFiles) * 100) : 0;
+
+    setMetrics({ totalFiles, approved, rejected, pending, successRate });
+  }, [dataFiles]);
+
+
+  const handleValidate = async () => {
+    if (!admin || !admin.email) {
+      toast.error('Admin information not found');
+      return;
+    }
+
+    setIsValidating(true);
     
     try {
-      // For automated validation, call the API directly
-      if (mode === 'automated') {
+      // If bulk mode, validate all files in dataFiles
+      if (isBulk && dataFiles.length > 0) {
+        const validatePromises = dataFiles.map(file => 
+          fetch(`/api/submissions/${file.id}/validate`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              adminEmail: admin.email
+            })
+          })
+        );
+        
+        const results = await Promise.allSettled(validatePromises);
+        const successful = results.filter((r, index) => 
+          r.status === 'fulfilled' && r.value.ok
+        ).length;
+        
+        const failed = results.length - successful;
+        
+        if (successful > 0) {
+          toast.success(`Successfully validated ${successful} submission(s)`);
+          
+          // Remove from validation queue in database
+          try {
+            await fetch('/api/validation-queue', {
+              method: 'DELETE',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                submissionIds: dataFiles.map(f => f.id),
+                adminEmail: admin.email
+              })
+            });
+          } catch (error) {
+            console.warn('Failed to remove from validation queue:', error);
+          }
+        }
+        
+        if (failed > 0) {
+          toast.error(`Failed to validate ${failed} submission(s)`);
+        }
+        
+        router.push('/admin-dashboard/pending-submissions');
+      } else if (submissionId && submissionData) {
+        // Single submission validation
         const response = await fetch(`/api/submissions/${submissionId}/validate`, {
           method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            adminEmail: admin.email
+          })
         });
         
         if (!response.ok) {
@@ -171,758 +437,935 @@ function ValidationHubContent() {
           throw new Error(errorData.error || 'Failed to validate submission');
         }
         
-        toast.success('Submission validated successfully (Automated)');
+        toast.success('Submission validated successfully');
+        
+        // Remove from validation queue in database
+        try {
+          await fetch('/api/validation-queue', {
+            method: 'DELETE',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              submissionId: submissionId,
+              adminEmail: admin.email
+            })
+          });
+        } catch (error) {
+          console.warn('Failed to remove from validation queue:', error);
+        }
+        
         router.push('/admin-dashboard/pending-submissions');
-      } else {
-        // For manual validation, show the file in the sandbox for review
-        toast.info('Manual validation mode activated. Review the file below.');
-        setShowValidationMode(false);
       }
     } catch (error: any) {
       console.error('Error validating submission:', error);
       toast.error(error.message || 'Failed to validate submission');
     } finally {
-      setIsValidatingSubmission(false);
+      setIsValidating(false);
     }
   };
 
-  const handleManualValidation = async () => {
-    if (!submissionId) return;
-    
+  const handleFileAction = useCallback(async (fileId: string, action: 'approve' | 'reject') => {
+    if (!admin || !admin.email) {
+      toast.error('Admin information not found');
+      return;
+    }
+
+    // For reject action, show dialog first
+    if (action === 'reject') {
+      setRejectingFileId(fileId);
+      setShowRejectDialog(true);
+      return;
+    }
+
+    // For approve, proceed directly
     try {
-      const response = await fetch(`/api/submissions/${submissionId}/validate`, {
+      const response = await fetch(`/api/submissions/${fileId}/validate`, {
         method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          adminEmail: admin.email
+        })
       });
-      
+
       if (!response.ok) {
         const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to validate submission');
+        throw new Error(errorData.error || 'Failed to approve submission');
+      }
+
+      // Reload submission data from database to get updated status
+      try {
+        const updatedResponse = await fetch(`/api/submissions/${fileId}`);
+        if (updatedResponse.ok) {
+          const updatedData = await updatedResponse.json();
+          const mapStatus = (dbStatus: string): 'scanning' | 'anomaly' | 'queued' | 'approved' | 'rejected' => {
+            if (dbStatus === 'validated' || dbStatus === 'successful') return 'approved';
+            if (dbStatus === 'rejected' || dbStatus === 'failed') return 'rejected';
+            if (dbStatus === 'submitted') return 'queued';
+            return 'scanning';
+          };
+
+          // Update local state with fresh data from database
+          setDataFiles(prev => prev.map(file => 
+            file.id === fileId ? { 
+              ...file, 
+              status: mapStatus(updatedData.status || 'pending')
+            } : file
+          ));
+        }
+      } catch (reloadError) {
+        console.warn('Failed to reload submission data, using local update:', reloadError);
+        // Fallback to local state update if reload fails
+        setDataFiles(prev => prev.map(file => 
+          file.id === fileId ? { ...file, status: 'approved' } : file
+        ));
       }
       
-      toast.success('Submission validated successfully (Manual)');
-      router.push('/admin-dashboard/pending-submissions');
+      toast.success('File approved and saved to database');
     } catch (error: any) {
-      console.error('Error validating submission:', error);
-      toast.error(error.message || 'Failed to validate submission');
+      console.error('Error approving file:', error);
+      toast.error(error.message || 'Failed to approve file');
+    }
+  }, [admin]);
+
+  const handleRejectWithFeedback = useCallback(async (
+    submissionId: string,
+    rejectionReason: string,
+    rejectionFeedback: string
+  ) => {
+    if (!admin || !admin.email) {
+      toast.error('Admin information not found');
+      throw new Error('Admin information not found');
+    }
+
+    try {
+      const response = await fetch(`/api/submissions/${submissionId}/reject`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          adminEmail: admin.email,
+          rejectionReason: rejectionReason || null,
+          rejectionFeedback: rejectionFeedback || null
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to reject submission');
+      }
+
+      // Reload submission data from database to get updated status
+      try {
+        const updatedResponse = await fetch(`/api/submissions/${submissionId}`);
+        if (updatedResponse.ok) {
+          const updatedData = await updatedResponse.json();
+          const mapStatus = (dbStatus: string): 'scanning' | 'anomaly' | 'queued' | 'approved' | 'rejected' => {
+            if (dbStatus === 'validated' || dbStatus === 'successful') return 'approved';
+            if (dbStatus === 'rejected' || dbStatus === 'failed') return 'rejected';
+            if (dbStatus === 'submitted') return 'queued';
+            return 'scanning';
+          };
+
+          // Update local state with fresh data from database
+          setDataFiles(prev => prev.map(file => 
+            file.id === submissionId ? { 
+              ...file, 
+              status: mapStatus(updatedData.status || 'pending')
+            } : file
+          ));
+        }
+      } catch (reloadError) {
+        console.warn('Failed to reload submission data, using local update:', reloadError);
+        // Fallback to local state update if reload fails
+        setDataFiles(prev => prev.map(file => 
+          file.id === submissionId ? { ...file, status: 'rejected' } : file
+        ));
+      }
+      
+      toast.success('Submission rejected with feedback');
+      setRejectingFileId(null);
+    } catch (error: any) {
+      console.error('Error rejecting file:', error);
+      throw error;
+    }
+  }, [admin]);
+
+
+
+  const handleBulkAction = async (action: 'approve' | 'reject' | 'delete') => {
+    if (selectedFiles.size === 0) {
+      toast.error('No files selected');
+      return;
+    }
+
+    if (!admin || !admin.email) {
+      toast.error('Admin information not found');
+      return;
+    }
+
+    if (action === 'delete') {
+      // For delete, just remove from local state (or implement delete API if needed)
+      setDataFiles(prev => prev.filter(f => !selectedFiles.has(f.id)));
+      toast.success(`${selectedFiles.size} file(s) deleted`);
+      setSelectedFiles(new Set());
+      return;
+    }
+
+    // For approve/reject, update database
+    const selectedIds = Array.from(selectedFiles);
+    const endpoint = action === 'approve' ? 'validate' : 'reject';
+    
+    try {
+      const actionPromises = selectedIds.map(id => 
+        fetch(`/api/submissions/${id}/${endpoint}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            adminEmail: admin.email
+          })
+        })
+      );
+
+      const results = await Promise.allSettled(actionPromises);
+      const successfulIds: string[] = [];
+      
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled' && result.value.ok) {
+          successfulIds.push(selectedIds[index]);
+        }
+      });
+      
+      const failed = results.length - successfulIds.length;
+
+      if (successfulIds.length > 0) {
+        // Reload data from database for successful actions
+        const mapStatus = (dbStatus: string): 'scanning' | 'anomaly' | 'queued' | 'approved' | 'rejected' => {
+          if (dbStatus === 'validated' || dbStatus === 'successful') return 'approved';
+          if (dbStatus === 'rejected' || dbStatus === 'failed') return 'rejected';
+          if (dbStatus === 'submitted') return 'queued';
+          return 'scanning';
+        };
+
+        // Reload updated data from database
+        const reloadPromises = successfulIds.map(async (id) => {
+          try {
+            const response = await fetch(`/api/submissions/${id}`);
+            if (response.ok) {
+              const data = await response.json();
+              return { id, status: mapStatus(data.status || 'pending') };
+            }
+          } catch (error) {
+            console.warn(`Failed to reload submission ${id}:`, error);
+          }
+          return null;
+        });
+
+        const reloadedData = await Promise.all(reloadPromises);
+        
+        // Update local state with fresh data from database
+        setDataFiles(prev => prev.map(file => {
+          const updated = reloadedData.find(d => d && d.id === file.id);
+          if (updated) {
+            return { ...file, status: updated.status };
+          }
+          // Fallback for files that couldn't be reloaded
+          if (selectedFiles.has(file.id)) {
+            return { ...file, status: action === 'approve' ? 'approved' : 'rejected' };
+          }
+          return file;
+        }));
+
+        toast.success(`Successfully ${action === 'approve' ? 'approved' : 'rejected'} ${successfulIds.length} file(s) and saved to database`);
+      }
+
+      if (failed > 0) {
+        toast.error(`Failed to ${action} ${failed} file(s)`);
+      }
+    } catch (error: any) {
+      console.error(`Error in bulk ${action}:`, error);
+      toast.error(`Failed to ${action} files`);
+    }
+    
+    setSelectedFiles(new Set());
+  };
+
+  const toggleFileSelection = (fileId: string) => {
+    setSelectedFiles(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(fileId)) {
+        newSet.delete(fileId);
+      } else {
+        newSet.add(fileId);
+      }
+      return newSet;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedFiles.size === filteredFiles.length) {
+      setSelectedFiles(new Set());
+    } else {
+      setSelectedFiles(new Set(filteredFiles.map(f => f.id)));
     }
   };
 
-  // Simulate real-time updates
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const newTime = new Date().toLocaleTimeString('en-US', { hour12: false });
-      const messages = [
-        'Processing validation queue...',
-        'Analyzing metadata consistency...',
-        'Cross-referencing with regional nodes...',
-        'Compression ratio verified',
-        'Duplicate check completed'
-      ];
-      
-      setLogs(prev => [...prev.slice(-3), {
-        time: newTime,
-        message: messages[Math.floor(Math.random() * messages.length)],
-        type: Math.random() > 0.8 ? 'warning' : 'info'
-      }]);
-
-      // Simulate metric changes
-      setMetrics(prev => ({
-        ...prev,
-        latency: Math.floor(110 + Math.random() * 30),
-        consistencyScore: +(98 + Math.random() * 1.5).toFixed(1)
-      }));
-    }, 5000);
-
-    return () => clearInterval(interval);
-  }, []);
-
-  const handleFileAction = (fileId: string, action: 'approve' | 'reject') => {
-    setDataFiles(prev => prev.map(file => 
-      file.id === fileId ? { ...file, status: action === 'approve' ? 'approved' : 'rejected' } : file
-    ));
-    
-    const file = dataFiles.find(f => f.id === fileId);
-    const newTime = new Date().toLocaleTimeString('en-US', { hour12: false });
-    setLogs(prev => [...prev, {
-      time: newTime,
-      message: `File ${file?.name} ${action === 'approve' ? 'APPROVED' : 'REJECTED'}`,
-      type: action === 'approve' ? 'info' : 'warning'
-    }]);
+  const formatFileSize = (bytes?: number): string => {
+    if (!bytes) return 'Unknown';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
   };
 
-  const handleDeleteFile = (fileId: string) => {
-    setDataFiles(prev => prev.filter(file => file.id !== fileId));
-    const newTime = new Date().toLocaleTimeString('en-US', { hour12: false });
-    setLogs(prev => [...prev, {
-      time: newTime,
-      message: `File removed from queue`,
-      type: 'warning'
-    }]);
-  };
-
-  const filteredFiles = (filterType === 'all' 
-    ? dataFiles 
-    : dataFiles.filter(file => file.type === filterType)
-  ).filter(file => 
-    searchQuery === '' || 
-    file.name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredFiles = dataFiles
+    .filter(file => filterType === 'all' || file.type === filterType)
+    .filter(file => searchQuery === '' || file.name.toLowerCase().includes(searchQuery.toLowerCase()))
+    .sort((a, b) => {
+      if (sortBy === 'name') return a.name.localeCompare(b.name);
+      if (sortBy === 'date') return (b.uploadedAt || '').localeCompare(a.uploadedAt || '');
+      return 0;
+    });
 
   const getFileIcon = (type: string) => {
     switch(type) {
-      case 'image': return <ImageIcon className="w-5 h-5" />;
-      case 'audio': return <Music className="w-5 h-5" />;
-      case 'video': return <Video className="w-5 h-5" />;
-      case 'document': return <FileText className="w-5 h-5" />;
-      default: return <FileText className="w-5 h-5" />;
+      case 'image': return ImageIcon;
+      case 'audio': return Music;
+      case 'video': return Video;
+      case 'document': return FileText;
+      default: return FileText;
     }
   };
 
-  const approvedCount = dataFiles.filter(f => f.status === 'approved').length;
-  const totalCount = dataFiles.length;
+  const getStatusColor = (status: string) => {
+    switch(status) {
+      case 'approved': return 'bg-green-100 text-green-700 border-green-200';
+      case 'rejected': return 'bg-red-100 text-red-700 border-red-200';
+      case 'scanning': return 'bg-blue-100 text-blue-700 border-blue-200';
+      case 'anomaly': return 'bg-yellow-100 text-yellow-700 border-yellow-200';
+      default: return 'bg-gray-100 text-gray-700 border-gray-200';
+    }
+  };
 
   if (!admin) {
     return (
-      <div className="flex min-h-screen bg-slate-900 text-slate-100">
+      <div className="flex min-h-screen bg-gray-50">
         <AdminSidebar activeItem="Validation Hub" />
         <div className="flex-1 flex items-center justify-center" style={{ marginLeft: 'var(--admin-sidebar-width, 256px)' }}>
-          <p className="text-slate-400">Loading...</p>
+          <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-screen bg-slate-900 text-slate-100 font-['Space_Grotesk',sans-serif]">
-      {/* Admin Sidebar */}
+    <div className="flex min-h-screen bg-gray-50">
       <AdminSidebar activeItem="Validation Hub" />
       
-      {/* Main Content */}
       <div className="flex-1" style={{ marginLeft: 'var(--admin-sidebar-width, 256px)' }}>
-        {/* Main Content */}
-        <main className="max-w-[1600px] mx-auto px-10 py-8">
-        {/* Breadcrumbs */}
-        <div className="flex items-center gap-2 mb-4">
-          <a className="text-slate-400 text-sm font-medium hover:text-primary transition-colors" href="#">Global Ingestion</a>
-          <ChevronRight className="w-4 h-4 text-slate-600" />
-          <span className="text-primary text-sm font-semibold tracking-wide uppercase">Level 1: Validation Control Center</span>
-        </div>
-
-        <div className="grid grid-cols-12 gap-8">
-          {/* Left Content Area */}
-          <div className="col-span-9 flex flex-col gap-6">
-            {/* Page Heading */}
-            <div className="flex flex-col gap-2">
-              <h1 className="text-white text-4xl font-black leading-tight tracking-tighter">Dataset Validation Strategy Hub</h1>
-              <p className="text-slate-400 text-lg max-w-2xl">
-                Mission-critical quality control gate for high-fidelity multi-modal data. Configure ingestion logic and verify integrity before synchronization.
-              </p>
+        <div className="p-4 md:p-6 lg:p-8 max-w-[1600px] mx-auto w-full">
+          {/* Header */}
+          <div className="mb-8">
+            <div className="flex items-center gap-2 text-sm text-gray-500 mb-3">
+              <span>Dashboard</span>
+              <ChevronRight className="w-4 h-4" />
+              <span className="text-gray-900 font-medium">Validation Hub</span>
             </div>
-
-            {/* Validation Strategy Section */}
-            <section className="bg-slate-800 border border-slate-700 rounded-xl p-6">
-              <div className="flex items-center justify-between mb-6">
-                <div className="flex items-center gap-3">
-                  <Shield className="w-6 h-6 text-amber-500" />
-                  <h2 className="text-white text-xl font-bold">Validation Strategy Selection</h2>
-                </div>
-                <Badge variant="outline" className="bg-amber-500/10 text-amber-500 border-amber-500/20 text-[10px] font-bold uppercase tracking-widest">
-                  {validationStrategy === 'automated' ? 'AI Active' : 'Manual Review Mode'}
-                </Badge>
-              </div>
-
-              {/* Strategy Cards */}
-              <div className="flex gap-4">
-                <label className="flex-1 cursor-pointer group">
-                  <input 
-                    type="radio" 
-                    name="strategy" 
-                    checked={validationStrategy === 'automated'}
-                    onChange={() => setValidationStrategy('automated')}
-                    className="hidden peer"
-                  />
-                  <div className="flex flex-col gap-3 p-5 rounded-xl border-2 border-slate-700 bg-slate-900 peer-checked:border-blue-500 peer-checked:bg-blue-500/20 peer-checked:shadow-lg peer-checked:shadow-blue-500/20 transition-all hover:border-blue-400">
-                    <div className="flex justify-between items-start">
-                      <div className="p-2 bg-blue-500/30 rounded-lg text-blue-400">
-                        <Brain className="w-6 h-6" />
-                      </div>
-                      {validationStrategy === 'automated' && (
-                        <CheckCircle2 className="w-6 h-6 text-blue-400" />
-                      )}
-                    </div>
-                    <div>
-                      <h3 className="text-white font-bold text-lg">Automated Validation</h3>
-                      <p className="text-slate-400 text-sm">AI-driven anomaly detection, format normalization, and duplicate scanning.</p>
-                    </div>
-                  </div>
-                </label>
-
-                <label className="flex-1 cursor-pointer group">
-                  <input 
-                    type="radio" 
-                    name="strategy" 
-                    checked={validationStrategy === 'manual'}
-                    onChange={() => setValidationStrategy('manual')}
-                    className="hidden peer"
-                  />
-                  <div className="flex flex-col gap-3 p-5 rounded-xl border-2 border-slate-700 bg-slate-900 peer-checked:border-amber-500 peer-checked:bg-amber-500/20 peer-checked:shadow-lg peer-checked:shadow-amber-500/20 transition-all hover:border-amber-400">
-                    <div className="flex justify-between items-start">
-                      <div className="p-2 bg-amber-500/30 rounded-lg text-amber-400">
-                        <UserSearch className="w-6 h-6" />
-                      </div>
-                      {validationStrategy === 'manual' && (
-                        <CheckCircle2 className="w-6 h-6 text-amber-400" />
-                      )}
-                    </div>
-                    <div>
-                      <h3 className="text-white font-bold text-lg">Manual Review</h3>
-                      <p className="text-slate-400 text-sm">Human-in-the-loop sampling, metadata verification, and visual inspection.</p>
-                    </div>
-                  </div>
-                </label>
-              </div>
-            </section>
-
-            {/* Data Quality Sandbox */}
-            <section className="flex flex-col gap-4">
-              <div className="flex items-center justify-between px-2">
-                <h2 className="text-white text-xl font-bold flex items-center gap-2">
-                  <FlaskConical className="w-6 h-6 text-primary" />
-                  Data Quality Sandbox
-                  <span className="text-slate-500 text-sm font-normal ml-2">
-                    ({approvedCount}/{totalCount} Approved)
-                  </span>
-                </h2>
-                <div className="flex gap-2">
-                  <div className="flex bg-slate-800 rounded-lg px-3 py-1.5 border border-slate-700 items-center gap-2">
-                    <Search className="w-4 h-4 text-slate-400" />
-                    <Input 
-                      className="bg-transparent border-none focus:outline-none text-sm text-white placeholder:text-slate-500 w-48 h-auto p-0" 
-                      placeholder="Search files..."
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                    />
-                  </div>
-                  <Select value={filterType} onValueChange={(value) => setFilterType(value as any)}>
-                    <SelectTrigger className="w-[140px] h-8 text-xs font-bold bg-slate-800 text-slate-300 border-slate-700 hover:text-white">
-                      <SelectValue />
-                      <Filter className="w-3 h-3 ml-2 text-slate-400" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">ALL FILES</SelectItem>
-                      <SelectItem value="image">IMAGES</SelectItem>
-                      <SelectItem value="audio">AUDIO</SelectItem>
-                      <SelectItem value="video">VIDEO</SelectItem>
-                      <SelectItem value="document">DOCUMENTS</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <Button 
-                    variant="ghost" 
-                    size="sm"
-                    onClick={() => setIsExpanded(!isExpanded)}
-                  >
-                    <Maximize2 className={`w-4 h-4 mr-1 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
-                    {isExpanded ? 'COLLAPSE' : 'EXPAND'}
-                  </Button>
-                </div>
-              </div>
-
-              <div className={`grid gap-6 transition-all ${isExpanded ? 'grid-cols-1' : 'grid-cols-3'}`}>
-                {filteredFiles.map((file) => (
-                  <div 
-                    key={file.id}
-                    className="relative group bg-slate-800 rounded-xl border border-slate-700 overflow-hidden transition-transform hover:scale-[1.02] cursor-pointer"
-                    onClick={() => setSelectedFile(file)}
-                  >
-                    {/* File Preview */}
-                    <div className="aspect-video bg-slate-900 relative overflow-hidden">
-                      {file.type === 'image' && file.thumbnail && (
-                        <>
-                          <img src={file.thumbnail} alt={file.name} className="w-full h-full object-cover" />
-                          <div className="absolute inset-0 bg-primary/20 mix-blend-overlay" />
-                        </>
-                      )}
-                      {file.type === 'video' && file.thumbnail && (
-                        <>
-                          <img src={file.thumbnail} alt={file.name} className="w-full h-full object-cover" />
-                          <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent" />
-                          <div className="absolute bottom-3 left-3 text-white text-[10px] font-mono">
-                            {file.duration} | {file.codec}
-                          </div>
-                        </>
-                      )}
-                      {file.type === 'audio' && (
-                        <div className="w-full h-full flex items-center justify-center p-6">
-                          <div className="flex items-end gap-1 h-16">
-                            {[8, 12, 6, 14, 10, 4, 16, 8, 12].map((h, i) => (
-                              <div 
-                                key={i}
-                                className={`w-1 ${i === 6 ? 'bg-amber-500' : 'bg-primary'} ${i === 0 ? 'animate-pulse' : ''}`}
-                                style={{ height: `${h * 4}px` }}
-                              />
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                      {file.type === 'document' && (
-                        <div className="w-full h-full flex items-center justify-center">
-                          <FileText className="w-16 h-16 text-primary/40" />
-                        </div>
-                      )}
-
-                      {/* Scanning Line Animation */}
-                      {file.status === 'scanning' && (
-                        <div className="absolute top-0 left-0 w-full h-0.5 bg-gradient-to-r from-transparent via-primary to-transparent animate-pulse" 
-                             style={{ boxShadow: '0 0 15px #3b83f7' }} />
-                      )}
-
-                      {/* Status Badge */}
-                      <div className="absolute top-3 left-3">
-                        <Badge 
-                          variant="outline"
-                          className={cn(
-                            "text-[10px] font-bold uppercase tracking-widest",
-                            file.status === 'scanning' && 'bg-primary text-white border-primary shadow-lg',
-                            file.status === 'anomaly' && 'bg-amber-500 text-black border-amber-500',
-                            file.status === 'approved' && 'bg-green-500/10 text-green-400 border-green-400/20',
-                            (file.status === 'queued' || file.status === 'rejected') && 'bg-slate-700/80 text-white border-slate-700'
-                          )}
-                        >
-                          {file.status}
-                        </Badge>
-                      </div>
-
-                      {/* Detection Box */}
-                      {file.status === 'scanning' && (
-                        <div className="absolute bottom-3 right-3">
-                          <div className="h-12 w-12 rounded border-2 border-primary border-dashed animate-pulse" />
-                        </div>
-                      )}
-
-                      {/* Hover Overlay */}
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <Eye className="w-8 h-8 text-white" />
-                      </div>
-
-                      {/* Delete Button */}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteFile(file.id);
-                        }}
-                        className="absolute top-3 right-3 p-1.5 bg-red-500/20 rounded hover:bg-red-500 text-red-400 hover:text-white opacity-0 group-hover:opacity-100 transition-all"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-
-                    {/* File Info */}
-                    <div className="p-4 bg-slate-800 border-t border-slate-700">
-                      <div className="flex justify-between items-center mb-2">
-                        <div className="flex items-center gap-2 flex-1 min-w-0">
-                          {getFileIcon(file.type)}
-                          <p className="text-white font-semibold truncate text-sm">{file.name}</p>
-                        </div>
-                        {file.matchScore && (
-                          <p className="text-primary font-mono text-xs ml-2">{file.matchScore}%</p>
-                        )}
-                        {file.anomalyType && (
-                          <p className="text-amber-500 font-mono text-xs ml-2">{file.anomalyType}</p>
-                        )}
-                      </div>
-                      
-                      {/* Action Buttons */}
-                      <div className="flex gap-2">
-                        <Button
-                          variant="default"
-                          size="sm"
-                          className="flex-1 bg-green-500/20 text-green-400 hover:bg-green-500 hover:text-white"
-                          disabled={file.status === 'queued' || file.status === 'approved'}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleFileAction(file.id, 'approve');
-                          }}
-                        >
-                          {file.status === 'approved' ? 'APPROVED' : 'APPROVE'}
-                        </Button>
-                        <Button
-                          variant="destructive"
-                          size="sm"
-                          className="flex-1"
-                          disabled={file.status === 'queued' || file.status === 'rejected'}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleFileAction(file.id, 'reject');
-                          }}
-                        >
-                          {file.status === 'rejected' ? 'REJECTED' : 'REJECT'}
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </section>
-          </div>
-
-          {/* Sidebar */}
-          <aside className="col-span-3 flex flex-col gap-6">
-            {/* Metrics */}
-            <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 flex flex-col gap-6">
-              <h2 className="text-white text-lg font-bold flex items-center gap-2">
-                <BarChart3 className="w-5 h-5 text-primary" />
-                Edge Node Metrics
-              </h2>
-              
-              <div className="space-y-4">
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex justify-between text-xs font-medium">
-                    <span className="text-slate-400">Node Status</span>
-                    <span className="text-green-400 flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                      ACTIVE ({metrics.activeNodes} NODES)
-                    </span>
-                  </div>
-                  <Progress 
-                    value={metrics.nodeStatus} 
-                    className="h-1.5 [&>div]:bg-green-500 bg-slate-700" 
-                  />
-                </div>
-
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex justify-between text-xs font-medium">
-                    <span className="text-slate-400">Processing Latency</span>
-                    <span className="text-primary">{metrics.latency}ms</span>
-                  </div>
-                  <Progress 
-                    value={(metrics.latency / 300) * 100} 
-                    className="h-1.5 [&>div]:bg-blue-500 bg-slate-700" 
-                  />
-                </div>
-
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex justify-between text-xs font-medium">
-                    <span className="text-slate-400">Detected Anomalies</span>
-                    <span className="text-amber-500 flex items-center gap-1">
-                      <AlertTriangle className="w-3 h-3" />
-                      {metrics.anomalies.toString().padStart(2, '0')} Warnings
-                    </span>
-                  </div>
-                  <Progress 
-                    value={(metrics.anomalies / 20) * 100} 
-                    className="h-1.5 [&>div]:bg-amber-500 bg-slate-700" 
-                  />
-                </div>
-
-                <div className="pt-4 border-t border-slate-700">
-                  <div className="flex flex-col gap-1">
-                    <span className="text-slate-400 text-xs font-medium uppercase tracking-wider">Consistency Score</span>
-                    <div className="flex items-end gap-2">
-                      <span className="text-3xl font-bold text-white tracking-tighter">{metrics.consistencyScore}%</span>
-                      <span className="text-green-400 text-xs font-bold mb-1 flex items-center gap-0.5">
-                        <TrendingUp className="w-3 h-3" />
-                        +{metrics.scoreChange}%
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Action Panel */}
-            <div className="bg-gradient-to-br from-blue-500/10 to-indigo-500/10 border border-blue-500/30 rounded-xl p-6 flex flex-col gap-4">
-              <div className="flex flex-col gap-2">
-                <h3 className="text-white font-bold">Platform Progression</h3>
-                <p className="text-slate-400 text-xs leading-relaxed">
-                  Once all assets in the sandbox are verified, you can proceed to the next layer of processing.
+            <div className="flex items-center justify-between">
+              <div>
+                <h1 className="text-3xl font-bold text-gray-900 mb-2">
+                  File Validation Center
+                  {isBulk && (
+                    <Badge className="ml-3 bg-blue-100 text-blue-700 border-blue-200">
+                      Bulk Mode ({dataFiles.length} submissions)
+                    </Badge>
+                  )}
+                </h1>
+                <p className="text-gray-600">
+                  {isBulk 
+                    ? `Review and validate ${dataFiles.length} selected submission(s)`
+                    : 'Review and validate uploaded submissions efficiently'
+                  }
                 </p>
               </div>
-              
-              <div className="bg-slate-900/50 rounded-lg p-3 mb-2">
-                <div className="flex justify-between text-xs mb-2">
-                  <span className="text-slate-400">Approval Progress</span>
-                  <span className="text-primary font-bold">{approvedCount}/{totalCount}</span>
+              <Button variant="outline" onClick={() => router.push('/admin-dashboard/pending-submissions')}>
+                <ChevronRight className="w-4 h-4 mr-2 rotate-180" />
+                Back to Submissions
+              </Button>
+            </div>
+          </div>
+
+          {/* Metrics Overview */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <Card className="border border-gray-200 shadow-none">
+              <CardContent className="pt-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm text-gray-600 mb-1">Total Files</p>
+                    <p className="text-3xl font-bold text-gray-900">{metrics.totalFiles}</p>
+                  </div>
+                  <div className="p-3 bg-blue-100 rounded-lg">
+                    <FileText className="w-6 h-6 text-blue-600" />
+                  </div>
                 </div>
-                <Progress 
-                  value={(approvedCount / totalCount) * 100} 
-                  className="h-1.5 [&>div]:bg-blue-500 bg-slate-800" 
-                />
-              </div>
+              </CardContent>
+            </Card>
 
-              <Button 
-                className="w-full"
-                size="lg"
-                disabled={approvedCount !== totalCount}
-              >
-                <span>Push to Regional Hub (Level 2)</span>
-                <Rocket className="w-4 h-4 ml-2" />
-              </Button>
-              
-              <Button variant="outline" className="w-full hover:bg-transparent hover:text-current hover:border-current">
-                <RefreshCw className="w-4 h-4 mr-2" />
-                Reset Session
-              </Button>
-              
-              <Button variant="ghost" className="w-full text-red-400 hover:text-red-300">
-                <Trash2 className="w-4 h-4 mr-2" />
-                Discard Session
-              </Button>
+            <Card className="border border-gray-200 shadow-none">
+              <CardContent className="pt-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm text-gray-600 mb-1">Approved</p>
+                    <p className="text-3xl font-bold text-green-600">{metrics.approved}</p>
+                  </div>
+                  <div className="p-3 bg-green-100 rounded-lg">
+                    <CheckCircle2 className="w-6 h-6 text-green-600" />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="border border-gray-200 shadow-none">
+              <CardContent className="pt-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm text-gray-600 mb-1">Pending Review</p>
+                    <p className="text-3xl font-bold text-yellow-600">{metrics.pending}</p>
+                  </div>
+                  <div className="p-3 bg-yellow-100 rounded-lg">
+                    <Clock className="w-6 h-6 text-yellow-600" />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="border border-gray-200 shadow-none">
+              <CardContent className="pt-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm text-gray-600 mb-1">Success Rate</p>
+                    <p className="text-3xl font-bold text-gray-900">{metrics.successRate}%</p>
+                  </div>
+                  <div className="p-3 bg-purple-100 rounded-lg">
+                    <TrendingUp className="w-6 h-6 text-purple-600" />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-6">
+            {/* Main Content */}
+            <div className="lg:col-span-8 space-y-4 lg:space-y-6">
+              {/* Validation Mode Selection */}
+              <Card className="border border-gray-200 shadow-none">
+                <CardHeader>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <CardTitle className="flex items-center gap-2">
+                        <Shield className="w-5 h-5 text-blue-600" />
+                        Validation Mode
+                      </CardTitle>
+                      <CardDescription>Choose how files should be validated</CardDescription>
+                    </div>
+                    <Badge variant="outline" className={validationMode === 'auto' ? 'bg-blue-50 text-blue-700' : 'bg-gray-50 text-gray-700'}>
+                      {validationMode === 'auto' ? 'Automatic' : 'Manual'}
+                    </Badge>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <Tabs value={validationMode} onValueChange={(v) => setValidationMode(v as any)}>
+                    <TabsList className="grid w-full grid-cols-2">
+                      <TabsTrigger value="auto">Automatic Validation</TabsTrigger>
+                      <TabsTrigger value="manual">Manual Review</TabsTrigger>
+                    </TabsList>
+                    <TabsContent value="auto" className="mt-4">
+                      <div className="flex items-start gap-4 p-4 bg-blue-50 rounded-lg border border-blue-100">
+                        <CheckCircle2 className="w-5 h-5 text-blue-600 mt-0.5" />
+                        <div className="flex-1">
+                          <h4 className="font-semibold text-gray-900 mb-1">AI-Powered Validation</h4>
+                          <p className="text-sm text-gray-600">Automatically detect anomalies, verify formats, and check for duplicates using machine learning algorithms.</p>
+                        </div>
+                      </div>
+                    </TabsContent>
+                    <TabsContent value="manual" className="mt-4">
+                      <div className="flex items-start gap-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                        <Eye className="w-5 h-5 text-gray-600 mt-0.5" />
+                        <div className="flex-1">
+                          <h4 className="font-semibold text-gray-900 mb-1">Manual Inspection</h4>
+                          <p className="text-sm text-gray-600">Review each file individually with detailed metadata verification and visual inspection tools.</p>
+                        </div>
+                      </div>
+                    </TabsContent>
+                  </Tabs>
+                </CardContent>
+              </Card>
+
+              {/* File Browser */}
+              <Card className="border border-gray-200 shadow-none">
+                <CardHeader>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <CardTitle>Files Under Review</CardTitle>
+                      <CardDescription>
+                        {selectedFiles.size > 0 ? `${selectedFiles.size} file(s) selected` : `${filteredFiles.length} file(s) found`}
+                      </CardDescription>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="flex bg-white border border-gray-200 rounded-lg">
+                        <Button
+                          variant={viewMode === 'grid' ? 'secondary' : 'ghost'}
+                          size="sm"
+                          onClick={() => setViewMode('grid')}
+                          className="rounded-r-none"
+                        >
+                          <Grid3x3 className="w-4 h-4" />
+                        </Button>
+                        <Button
+                          variant={viewMode === 'list' ? 'secondary' : 'ghost'}
+                          size="sm"
+                          onClick={() => setViewMode('list')}
+                          className="rounded-l-none"
+                        >
+                          <List className="w-4 h-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {/* Toolbar */}
+                  <div className="flex items-center gap-3 mb-6">
+                    <div className="flex-1 relative">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <Input
+                        placeholder="Search files..."
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        className="pl-10"
+                      />
+                    </div>
+                    <Select value={filterType} onValueChange={(v) => setFilterType(v as any)}>
+                      <SelectTrigger className="w-40">
+                        <Filter className="w-4 h-4 mr-2" />
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All Types</SelectItem>
+                        <SelectItem value="image">Images</SelectItem>
+                        <SelectItem value="audio">Audio</SelectItem>
+                        <SelectItem value="video">Videos</SelectItem>
+                        <SelectItem value="document">Documents</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Select value={sortBy} onValueChange={(v) => setSortBy(v as any)}>
+                      <SelectTrigger className="w-40">
+                        <SortAsc className="w-4 h-4 mr-2" />
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="date">Sort by Date</SelectItem>
+                        <SelectItem value="name">Sort by Name</SelectItem>
+                        <SelectItem value="status">Sort by Status</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* Bulk Actions */}
+                  {selectedFiles.size > 0 && (
+                    <div className="flex items-center gap-2 mb-4 p-3 bg-blue-50 rounded-lg border border-blue-100">
+                      <span className="text-sm font-medium text-blue-900">{selectedFiles.size} selected</span>
+                      <div className="flex-1" />
+                      <Button size="sm" variant="outline" onClick={() => handleBulkAction('approve')}>
+                        <CheckSquare className="w-4 h-4 mr-2" />
+                        Approve All
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => handleBulkAction('reject')}>
+                        <XSquare className="w-4 h-4 mr-2" />
+                        Reject All
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => handleBulkAction('delete')}>
+                        <Trash2 className="w-4 h-4 mr-2" />
+                        Delete
+                      </Button>
+                    </div>
+                  )}
+
+                  {/* Files Display */}
+                  {isLoading ? (
+                    <div className="text-center py-12">
+                      <Loader2 className="w-12 h-12 text-gray-400 mx-auto mb-3 animate-spin" />
+                      <p className="text-gray-600">Loading submission data...</p>
+                    </div>
+                  ) : filteredFiles.length === 0 ? (
+                    <div className="text-center py-12">
+                      <FileText className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+                      <p className="text-gray-600">
+                        {submissionId ? 'No files found for this submission' : 'No files to validate'}
+                      </p>
+                      {submissionId && (
+                        <Button
+                          variant="outline"
+                          className="mt-4"
+                          onClick={() => loadSubmissionData()}
+                        >
+                          <RefreshCw className="w-4 h-4 mr-2" />
+                          Retry Loading
+                        </Button>
+                      )}
+                    </div>
+                  ) : viewMode === 'grid' ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {filteredFiles.map((file) => {
+                        const Icon = getFileIcon(file.type);
+                        return (
+                          <div
+                            key={file.id}
+                            className={cn(
+                              "group relative border-2 rounded-lg overflow-hidden transition-all hover:border-blue-300",
+                              selectedFiles.has(file.id) ? 'border-blue-500 bg-blue-50' : 'border-gray-200 bg-white'
+                            )}
+                          >
+                            {/* Selection Checkbox */}
+                            <div className="absolute top-3 left-3 z-10">
+                              <Checkbox
+                                checked={selectedFiles.has(file.id)}
+                                onCheckedChange={() => toggleFileSelection(file.id)}
+                                className="bg-white"
+                              />
+                            </div>
+
+                            {/* Thumbnail */}
+                            <div className="aspect-video bg-gray-100 relative cursor-pointer" onClick={() => { setPreviewFile(file); setShowPreviewModal(true); }}>
+                              {file.type === 'image' && file.thumbnail ? (
+                                <img src={file.thumbnail} alt={file.name} className="w-full h-full object-cover" />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center">
+                                  <Icon className="w-12 h-12 text-gray-300" />
+                                </div>
+                              )}
+                              <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100">
+                                <Eye className="w-6 h-6 text-white" />
+                              </div>
+                            </div>
+
+                            {/* File Info */}
+                            <div className="p-4">
+                              <div className="flex items-start justify-between mb-2">
+                                <div className="flex-1 min-w-0">
+                                  <p className="font-medium text-gray-900 truncate text-sm">{file.name}</p>
+                                  <p className="text-xs text-gray-500">{formatFileSize(file.size)}</p>
+                                </div>
+                                <Badge variant="outline" className={cn('text-xs', getStatusColor(file.status))}>
+                                  {file.status}
+                                </Badge>
+                              </div>
+
+                              <div className="flex gap-2">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="flex-1 text-green-600 border-green-200 hover:bg-green-50"
+                                  disabled={file.status === 'approved'}
+                                  onClick={(e) => { e.stopPropagation(); handleFileAction(file.id, 'approve'); }}
+                                >
+                                  {file.status === 'approved' ? 'Approved' : 'Approve'}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="flex-1 text-red-600 border-red-200 hover:bg-red-50"
+                                  disabled={file.status === 'rejected'}
+                                  onClick={(e) => { e.stopPropagation(); handleFileAction(file.id, 'reject'); }}
+                                >
+                                  {file.status === 'rejected' ? 'Rejected' : 'Reject'}
+                                </Button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg text-sm font-medium text-gray-700 border border-gray-200">
+                        <Checkbox checked={selectedFiles.size === filteredFiles.length} onCheckedChange={toggleSelectAll} />
+                        <div className="flex-1 grid grid-cols-5 gap-4">
+                          <span>Name</span>
+                          <span>Type</span>
+                          <span>Size</span>
+                          <span>Status</span>
+                          <span className="text-right">Actions</span>
+                        </div>
+                      </div>
+                      {filteredFiles.map((file) => {
+                        const Icon = getFileIcon(file.type);
+                        return (
+                          <div
+                            key={file.id}
+                            className={cn(
+                              "flex items-center gap-3 p-3 rounded-lg border transition-all",
+                              selectedFiles.has(file.id) ? 'border-blue-500 bg-blue-50' : 'border-gray-200 bg-white hover:border-gray-300'
+                            )}
+                          >
+                            <Checkbox
+                              checked={selectedFiles.has(file.id)}
+                              onCheckedChange={() => toggleFileSelection(file.id)}
+                            />
+                            <div className="flex-1 grid grid-cols-5 gap-4 items-center">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <Icon className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                                <span className="truncate text-sm font-medium text-gray-900">{file.name}</span>
+                              </div>
+                              <span className="text-sm text-gray-600 capitalize">{file.type}</span>
+                              <span className="text-sm text-gray-600">{formatFileSize(file.size)}</span>
+                              <Badge variant="outline" className={cn('text-xs w-fit', getStatusColor(file.status))}>
+                                {file.status}
+                              </Badge>
+                              <div className="flex items-center justify-end gap-2">
+                                <Button size="sm" variant="ghost" onClick={() => { setPreviewFile(file); setShowPreviewModal(true); }}>
+                                  <Eye className="w-4 h-4" />
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="text-green-600 hover:bg-green-50"
+                                  disabled={file.status === 'approved'}
+                                  onClick={() => handleFileAction(file.id, 'approve')}
+                                >
+                                  <CheckCircle2 className="w-4 h-4" />
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="text-red-600 hover:bg-red-50"
+                                  disabled={file.status === 'rejected'}
+                                  onClick={() => handleFileAction(file.id, 'reject')}
+                                >
+                                  <X className="w-4 h-4" />
+                                </Button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
             </div>
 
-            {/* System Logs */}
-            <div className="bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-600 rounded-xl p-4">
-              <div className="flex justify-between items-center mb-3">
-                <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">Real-time Logs</span>
-                <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
-              </div>
-              <div className="font-mono text-[10px] space-y-2 overflow-hidden max-h-32">
-                {logs.slice(-4).map((log, i) => (
-                  <p key={i} className={log.type === 'warning' ? 'text-amber-400' : 'text-slate-300'}>
-                    <span className={log.type === 'warning' ? 'text-amber-400' : 'text-blue-400'}>
-                      [{log.time}]
-                    </span> {log.message}
-                  </p>
-                ))}
-              </div>
-            </div>
+            {/* Sidebar */}
+            <div className="lg:col-span-4 space-y-4 lg:space-y-6">
+              {/* Progress Card */}
+              <Card className="border border-gray-200 shadow-none">
+                <CardHeader>
+                  <CardTitle className="text-lg">Validation Progress</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div>
+                    <div className="flex justify-between text-sm mb-2">
+                      <span className="text-gray-600">Completion</span>
+                      <span className="font-semibold text-gray-900">{metrics.totalFiles > 0 ? Math.round(((metrics.approved + metrics.rejected) / metrics.totalFiles) * 100) : 0}%</span>
+                    </div>
+                    <Progress value={metrics.totalFiles > 0 ? ((metrics.approved + metrics.rejected) / metrics.totalFiles) * 100 : 0} className="h-2" />
+                  </div>
 
-            {/* Quick Actions */}
-            <div className="bg-slate-800 border border-slate-700 rounded-xl p-4">
-              <h3 className="text-white text-sm font-bold mb-3">Quick Actions</h3>
-              <div className="space-y-2">
-                <Button variant="ghost" size="sm" className="w-full justify-start">
-                  <Download className="w-4 h-4 mr-2" />
-                  Export Report
-                </Button>
-                <Button variant="ghost" size="sm" className="w-full justify-start">
-                  <RefreshCw className="w-4 h-4 mr-2" />
-                  Re-scan All
-                </Button>
-                <Button variant="ghost" size="sm" className="w-full justify-start">
-                  <BarChart3 className="w-4 h-4 mr-2" />
-                  View Analytics
-                </Button>
-              </div>
+                  <div className="space-y-3 pt-4 border-t">
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-gray-600">Approved</span>
+                      <span className="font-semibold text-green-600">{metrics.approved}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-gray-600">Rejected</span>
+                      <span className="font-semibold text-red-600">{metrics.rejected}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-gray-600">Pending</span>
+                      <span className="font-semibold text-yellow-600">{metrics.pending}</span>
+                    </div>
+                  </div>
+
+                  {/* Bulk Validate Button */}
+                  {(isBulk || dataFiles.length > 1) && (
+                    <div className="pt-4 border-t mt-4">
+                      <Button
+                        className="w-full bg-green-600 hover:bg-green-700 text-white"
+                        onClick={handleValidate}
+                        disabled={isValidating || dataFiles.length === 0}
+                      >
+                        {isValidating ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            Validating...
+                          </>
+                        ) : (
+                          <>
+                            <CheckCircle2 className="w-4 h-4 mr-2" />
+                            Validate All ({dataFiles.length})
+                          </>
+                        )}
+                      </Button>
+                      {isBulk && (
+                        <p className="text-xs text-gray-500 mt-2 text-center">
+                          Validating {dataFiles.length} submission(s) from pending queue
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Send to Local Hub Button */}
+              <Card className="border border-gray-200 shadow-none">
+                <CardContent className="pt-6">
+                  <Button
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white"
+                    onClick={() => {
+                      // TODO: Implement send to local hub functionality
+                      toast.info('Send to Local Hub functionality will be implemented soon');
+                    }}
+                    disabled={metrics.approved === 0}
+                  >
+                    <Send className="w-4 h-4 mr-2" />
+                    Send Approved Datasets to Local Hub
+                  </Button>
+                  {metrics.approved > 0 && (
+                    <p className="text-xs text-gray-500 mt-2 text-center">
+                      {metrics.approved} approved dataset(s) ready to send
+                    </p>
+                  )}
+                  {metrics.approved === 0 && (
+                    <p className="text-xs text-gray-400 mt-2 text-center">
+                      No approved datasets available
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+
             </div>
-          </aside>
+          </div>
         </div>
-      </main>
+      </div>
 
-      {/* File Detail Modal */}
-      <Dialog open={!!selectedFile} onOpenChange={(open) => !open && setSelectedFile(null)}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-auto bg-slate-800 border-slate-700">
+      {/* Preview Modal */}
+      <Dialog open={showPreviewModal} onOpenChange={setShowPreviewModal}>
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-3">
-              {selectedFile && getFileIcon(selectedFile.type)}
-              <div>
-                <h3 className="text-white font-bold text-lg">{selectedFile?.name}</h3>
-                <DialogDescription className="text-slate-400 text-sm">File Details & Validation</DialogDescription>
-              </div>
+              {previewFile && (() => {
+                const Icon = getFileIcon(previewFile.type);
+                return <Icon className="w-5 h-5 text-gray-600" />;
+              })()}
+              <span>{previewFile?.name}</span>
             </DialogTitle>
+            <DialogDescription>File Preview and Details</DialogDescription>
           </DialogHeader>
 
-          {/* Modal Content */}
-          <div className="px-6 pb-6">
-            {/* File Preview */}
-            <div className="aspect-video bg-slate-900 rounded-xl overflow-hidden mb-6">
-              {selectedFile?.type === 'image' && selectedFile.thumbnail && (
-                <img src={selectedFile.thumbnail} alt={selectedFile.name} className="w-full h-full object-cover" />
-              )}
-              {selectedFile?.type === 'video' && selectedFile.thumbnail && (
-                <div className="relative w-full h-full">
-                  <img src={selectedFile.thumbnail} alt={selectedFile.name} className="w-full h-full object-cover" />
-                  <div className="absolute inset-0 flex items-center justify-center bg-black/40">
-                    <button className="p-4 bg-primary rounded-full hover:bg-primary/90 transition-colors">
-                      <Play className="w-8 h-8 text-white" />
-                    </button>
+          {previewFile && (
+            <div className="space-y-6">
+              {/* Preview */}
+              <div className="aspect-video bg-gray-100 rounded-lg overflow-hidden">
+                {previewFile.type === 'image' && previewFile.thumbnail ? (
+                  <img src={previewFile.thumbnail} alt={previewFile.name} className="w-full h-full object-contain" />
+                ) : previewFile.type === 'video' && previewFile.thumbnail ? (
+                  <video 
+                    src={previewFile.thumbnail} 
+                    controls 
+                    className="w-full h-full"
+                    onError={(e) => {
+                      console.error('Video playback error in validation hub:', e);
+                      toast.error('Video cannot be played. Preview data may be invalid.');
+                    }}
+                  />
+                ) : previewFile.type === 'audio' && previewFile.thumbnail ? (
+                  <div className="w-full h-full flex items-center justify-center p-8">
+                    <audio src={previewFile.thumbnail} controls className="w-full" />
                   </div>
-                </div>
-              )}
-              {selectedFile?.type === 'audio' && (
-                <div className="w-full h-full flex flex-col items-center justify-center gap-4">
-                  <Music className="w-16 h-16 text-primary/40" />
-                  <div className="flex items-end gap-2 h-24">
-                    {[10, 16, 8, 18, 14, 6, 20, 10, 16, 8, 18, 14].map((h, i) => (
-                      <div 
-                        key={i}
-                        className={`w-2 ${i === 6 ? 'bg-amber-500' : 'bg-primary'} rounded-t`}
-                        style={{ height: `${h * 4}px` }}
-                      />
-                    ))}
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center">
+                    {(() => {
+                      const Icon = getFileIcon(previewFile.type);
+                      return <Icon className="w-24 h-24 text-gray-300" />;
+                    })()}
                   </div>
-                </div>
-              )}
-              {selectedFile?.type === 'document' && (
-                <div className="w-full h-full flex items-center justify-center">
-                  <FileText className="w-24 h-24 text-primary/40" />
-                </div>
-              )}
-            </div>
+                )}
+              </div>
 
-            {/* File Metadata */}
-            <div className="grid grid-cols-2 gap-4 mb-6">
-              <div className="bg-slate-900 rounded-lg p-4">
-                <span className="text-slate-400 text-xs uppercase tracking-wider">Status</span>
-                <div className="mt-2">
-                  <Badge 
-                    variant="outline"
-                    className={cn(
-                      "text-[10px] font-bold uppercase tracking-widest",
-                      selectedFile?.status === 'scanning' && 'bg-primary text-white border-primary shadow-lg',
-                      selectedFile?.status === 'anomaly' && 'bg-amber-500 text-black border-amber-500',
-                      selectedFile?.status === 'approved' && 'bg-green-500/10 text-green-400 border-green-400/20',
-                      (selectedFile?.status === 'queued' || selectedFile?.status === 'rejected') && 'bg-slate-700/80 text-white border-slate-700'
-                    )}
-                  >
-                    {selectedFile?.status}
+              {/* Details */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <p className="text-xs text-gray-600 mb-1">File Name</p>
+                  <p className="font-medium text-gray-900 text-sm">{previewFile.name}</p>
+                </div>
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <p className="text-xs text-gray-600 mb-1">File Type</p>
+                  <p className="font-medium text-gray-900 text-sm capitalize">{previewFile.type}</p>
+                </div>
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <p className="text-xs text-gray-600 mb-1">File Size</p>
+                  <p className="font-medium text-gray-900 text-sm">{formatFileSize(previewFile.size)}</p>
+                </div>
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <p className="text-xs text-gray-600 mb-1">Status</p>
+                  <Badge variant="outline" className={cn('text-xs', getStatusColor(previewFile.status))}>
+                    {previewFile.status}
                   </Badge>
-                </div>
-              </div>
-              <div className="bg-slate-900 rounded-lg p-4">
-                <span className="text-slate-400 text-xs uppercase tracking-wider">File Type</span>
-                <p className="text-white font-semibold mt-2 capitalize">{selectedFile?.type}</p>
-              </div>
-              {selectedFile?.matchScore && (
-                <div className="bg-slate-900 rounded-lg p-4">
-                  <span className="text-slate-400 text-xs uppercase tracking-wider">Match Score</span>
-                  <p className="text-primary font-bold text-2xl mt-2">{selectedFile.matchScore}%</p>
-                </div>
-              )}
-              {selectedFile?.anomalyType && (
-                <div className="bg-slate-900 rounded-lg p-4">
-                  <span className="text-slate-400 text-xs uppercase tracking-wider">Anomaly Type</span>
-                  <p className="text-amber-500 font-semibold mt-2">{selectedFile.anomalyType}</p>
-                </div>
-              )}
-              {selectedFile?.duration && (
-                <div className="bg-slate-900 rounded-lg p-4">
-                  <span className="text-slate-400 text-xs uppercase tracking-wider">Duration</span>
-                  <p className="text-white font-semibold mt-2">{selectedFile.duration}</p>
-                </div>
-              )}
-              {selectedFile?.codec && (
-                <div className="bg-slate-900 rounded-lg p-4">
-                  <span className="text-slate-400 text-xs uppercase tracking-wider">Codec</span>
-                  <p className="text-white font-semibold mt-2">{selectedFile.codec}</p>
-                </div>
-              )}
-            </div>
-
-            {/* Actions */}
-            <div className="flex gap-3">
-              <Button
-                variant="default"
-                className="flex-1 bg-green-500/20 text-green-400 hover:bg-green-500 hover:text-white"
-                disabled={selectedFile?.status === 'approved'}
-                onClick={() => {
-                  if (selectedFile) {
-                    handleFileAction(selectedFile.id, 'approve');
-                    setSelectedFile(null);
-                  }
-                }}
-              >
-                <CheckCircle2 className="w-4 h-4 mr-2" />
-                {selectedFile?.status === 'approved' ? 'APPROVED' : 'APPROVE FILE'}
-              </Button>
-              <Button
-                variant="destructive"
-                className="flex-1"
-                disabled={selectedFile?.status === 'rejected'}
-                onClick={() => {
-                  if (selectedFile) {
-                    handleFileAction(selectedFile.id, 'reject');
-                    setSelectedFile(null);
-                  }
-                }}
-              >
-                <X className="w-4 h-4 mr-2" />
-                {selectedFile?.status === 'rejected' ? 'REJECTED' : 'REJECT FILE'}
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* Upload Modal */}
-      <Dialog open={showUploadModal} onOpenChange={setShowUploadModal}>
-        <DialogContent className="max-w-2xl bg-slate-800 border-slate-700">
-          <DialogHeader>
-            <DialogTitle className="text-white font-bold text-xl">Upload Dataset Files</DialogTitle>
-            <DialogDescription className="text-slate-400 text-sm">Add files to the validation queue</DialogDescription>
-          </DialogHeader>
-
-          {/* Modal Content */}
-          <div className="px-6 pb-6">
-              {/* Drop Zone */}
-              <div className="border-2 border-dashed border-slate-700 rounded-xl p-12 text-center hover:border-primary transition-colors cursor-pointer bg-slate-900/50">
-                <Upload className="w-12 h-12 text-slate-400 mx-auto mb-4" />
-                <h4 className="text-white font-semibold mb-2">Drop files here or click to browse</h4>
-                <p className="text-slate-400 text-sm mb-4">
-                  Supports: Images, Audio, Video, Documents
-                </p>
-                <Button size="sm">
-                  Select Files
-                </Button>
-              </div>
-
-              {/* File Type Options */}
-              <div className="grid grid-cols-4 gap-3 mt-6">
-                <div className="bg-slate-900 rounded-lg p-4 text-center hover:bg-slate-700 transition-colors cursor-pointer">
-                  <ImageIcon className="w-6 h-6 text-primary mx-auto mb-2" />
-                  <span className="text-xs text-slate-400">Images</span>
-                </div>
-                <div className="bg-slate-900 rounded-lg p-4 text-center hover:bg-slate-700 transition-colors cursor-pointer">
-                  <Music className="w-6 h-6 text-primary mx-auto mb-2" />
-                  <span className="text-xs text-slate-400">Audio</span>
-                </div>
-                <div className="bg-slate-900 rounded-lg p-4 text-center hover:bg-slate-700 transition-colors cursor-pointer">
-                  <Video className="w-6 h-6 text-primary mx-auto mb-2" />
-                  <span className="text-xs text-slate-400">Video</span>
-                </div>
-                <div className="bg-slate-900 rounded-lg p-4 text-center hover:bg-slate-700 transition-colors cursor-pointer">
-                  <FileText className="w-6 h-6 text-primary mx-auto mb-2" />
-                  <span className="text-xs text-slate-400">Documents</span>
                 </div>
               </div>
 
               {/* Actions */}
-              <DialogFooter className="mt-6">
-                <Button variant="outline" className="flex-1" onClick={() => setShowUploadModal(false)}>
-                  Cancel
+              <div className="flex gap-3 pt-4 border-t">
+                <Button
+                  className="flex-1 bg-green-600 hover:bg-green-700 text-white"
+                  disabled={previewFile.status === 'approved'}
+                  onClick={() => {
+                    handleFileAction(previewFile.id, 'approve');
+                    setShowPreviewModal(false);
+                  }}
+                >
+                  <CheckCircle2 className="w-4 h-4 mr-2" />
+                  {previewFile.status === 'approved' ? 'Approved' : 'Approve File'}
                 </Button>
-                <Button className="flex-1">
-                  <Upload className="w-4 h-4 mr-2" />
-                  Start Upload
+                <Button
+                  variant="outline"
+                  className="flex-1 border-red-300 text-red-600 hover:bg-red-50"
+                  disabled={previewFile.status === 'rejected'}
+                  onClick={() => {
+                    setShowPreviewModal(false);
+                    handleFileAction(previewFile.id, 'reject');
+                  }}
+                >
+                  <X className="w-4 h-4 mr-2" />
+                  {previewFile.status === 'rejected' ? 'Rejected' : 'Reject File'}
                 </Button>
-              </DialogFooter>
-          </div>
+                <Button 
+                  variant="outline" 
+                  onClick={() => {
+                    setShowPreviewModal(false);
+                  }}
+                >
+                  Close
+                </Button>
+              </div>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 
-        {/* Custom Styles */}
-        <style jsx global>{`
-          @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
-
-          /* Scrollbar Styling */
-          ::-webkit-scrollbar {
-            width: 8px;
-            height: 8px;
-          }
-
-          ::-webkit-scrollbar-track {
-            background: rgb(15 23 42);
-          }
-
-          ::-webkit-scrollbar-thumb {
-            background: rgb(51 65 85);
-            border-radius: 4px;
-          }
-
-          ::-webkit-scrollbar-thumb:hover {
-            background: rgb(59 130 246);
-          }
-        `}</style>
-      </div>
+      {/* Rejection Dialog */}
+      <RejectionDialog
+        open={showRejectDialog}
+        onOpenChange={setShowRejectDialog}
+        submissionId={rejectingFileId}
+        adminEmail={admin?.email || ''}
+        onReject={handleRejectWithFeedback}
+      />
     </div>
   );
 }
@@ -930,10 +1373,10 @@ function ValidationHubContent() {
 export default function ValidationHub() {
   return (
     <Suspense fallback={
-      <div className="flex min-h-screen bg-slate-900 text-slate-100">
+      <div className="flex min-h-screen bg-gray-50">
         <AdminSidebar activeItem="Validation Hub" />
         <div className="flex-1 flex items-center justify-center" style={{ marginLeft: 'var(--admin-sidebar-width, 256px)' }}>
-          <p className="text-slate-400">Loading...</p>
+          <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
         </div>
       </div>
     }>

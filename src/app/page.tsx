@@ -1,77 +1,11 @@
 'use client';
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Users, Shield, ArrowRight, LogIn } from "lucide-react";
 
 export default function Home() {
-  const [user, setUser] = useState<{ name?: string; email?: string } | null>(null);
-  const [isAdmin, setIsAdmin] = useState(false);
-
-  useEffect(() => {
-    // Check if user is logged in
-    if (typeof window !== 'undefined') {
-      const userData = localStorage.getItem('user');
-      const adminData = localStorage.getItem('admin');
-      
-      if (userData) {
-        try {
-          setUser(JSON.parse(userData));
-        } catch (e) {
-          // Invalid data, ignore
-        }
-      }
-      
-      if (adminData) {
-        try {
-          setIsAdmin(true);
-        } catch (e) {
-          // Invalid data, ignore
-        }
-      }
-    }
-  }, []);
-
-  const handleLogout = () => {
-    localStorage.removeItem('user');
-    localStorage.removeItem('admin');
-    setUser(null);
-    setIsAdmin(false);
-  };
-
-  // If user is logged in, show dashboard link
-  if (user || isAdmin) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-zinc-50 to-zinc-100 dark:from-black dark:to-zinc-900">
-        <Card className="w-full max-w-md">
-          <CardHeader className="text-center">
-            <CardTitle className="text-2xl">Welcome Back!</CardTitle>
-            <CardDescription>
-              {isAdmin ? 'You are logged in as Admin' : `Welcome, ${user?.name || user?.email || 'User'}`}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <Button asChild className="w-full" size="lg">
-              <Link href={isAdmin ? '/admin-dashboard' : '/dashboard'}>
-                Go to Dashboard
-                <ArrowRight className="ml-2 h-4 w-4" />
-              </Link>
-            </Button>
-            <Button 
-              variant="outline" 
-              className="w-full" 
-              onClick={handleLogout}
-            >
-              Logout
-            </Button>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
-
   return (
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-zinc-50 to-zinc-100 dark:from-black dark:to-zinc-900 px-4 py-12">
       <div className="w-full max-w-6xl mx-auto">

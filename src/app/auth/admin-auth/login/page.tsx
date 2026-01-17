@@ -22,6 +22,7 @@ import {
 interface AdminLoginFormData {
   email: string;
   password: string;
+  adminCode: string;
   rememberMe: boolean;
 }
 
@@ -30,6 +31,7 @@ const AdminLoginPage = () => {
   const [formData, setFormData] = useState<AdminLoginFormData>({
     email: "",
     password: "",
+    adminCode: "",
     rememberMe: false,
   });
 
@@ -57,21 +59,53 @@ const AdminLoginPage = () => {
       newErrors.password = "Password is required";
     }
 
+    if (!formData.adminCode.trim()) {
+      newErrors.adminCode = "Admin code is required";
+    }
+
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
 
   const handleSubmit = () => {
     if (validateForm()) {
+      // Validate admin code first
+      const adminCode = formData.adminCode.trim().toLowerCase();
+      const validCodes = ['super2024', 'validator'];
+      
+      if (!validCodes.includes(adminCode)) {
+        toast.error("Invalid Admin Code", {
+          description: "Please enter a valid admin code (super2024 or validator).",
+        });
+        return;
+      }
+
       const admin = authenticateAdmin(formData.email, formData.password);
       
       if (admin) {
+        // Store admin code in localStorage for future reference
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('admin_code', adminCode);
+        }
+
+        // Determine redirect based on admin code
+        let redirectPath = '/admin-dashboard';
+        let redirectMessage = "Redirecting to admin dashboard...";
+        
+        if (adminCode === 'super2024') {
+          redirectPath = '/regional-hub';
+          redirectMessage = "Redirecting to regional hub...";
+        } else if (adminCode === 'validator') {
+          redirectPath = '/admin-dashboard';
+          redirectMessage = "Redirecting to admin dashboard...";
+        }
+
         toast.success("Admin Login Successful!", {
-          description: "Redirecting to admin dashboard...",
+          description: redirectMessage,
         });
         
         setTimeout(() => {
-          router.push('/admin-dashboard');
+          router.push(redirectPath);
         }, 1500);
       } else {
         // Check if admin exists but is pending
@@ -162,6 +196,31 @@ const AdminLoginPage = () => {
                     {errors.password}
                   </p>
                 )}
+              </div>
+
+              <div>
+                <Label className="text-sm font-medium text-gray-700 mb-2 block">
+                  Admin Code *
+                </Label>
+                <div className="relative">
+                  <Shield className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-gray-400" />
+                  <Input
+                    type="text"
+                    placeholder="Enter admin code (super2024 or validator)"
+                    value={formData.adminCode}
+                    onChange={(e) => handleInputChange("adminCode", e.target.value)}
+                    className="pl-10 h-11 border-gray-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+                {errors.adminCode && (
+                  <p className="text-red-600 text-sm mt-1 flex items-center gap-1">
+                    <AlertCircle className="h-4 w-4" />
+                    {errors.adminCode}
+                  </p>
+                )}
+                <p className="text-gray-500 text-xs mt-1">
+                  Use "super2024" for Regional Hub or "validator" for Admin Dashboard
+                </p>
               </div>
 
               <div className="flex items-center justify-between">

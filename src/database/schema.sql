@@ -183,3 +183,29 @@ CREATE TRIGGER update_admins_updated_at
     BEFORE UPDATE ON admins
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
+
+-- Create notifications table
+CREATE TABLE IF NOT EXISTS notifications (
+  id VARCHAR(255) PRIMARY KEY,
+  user_email VARCHAR(255) NOT NULL,
+  type VARCHAR(50) NOT NULL CHECK (type IN ('success', 'error', 'info', 'warning')),
+  title VARCHAR(500) NOT NULL,
+  message TEXT NOT NULL,
+  read BOOLEAN DEFAULT false,
+  action_url VARCHAR(500),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create indexes for notifications
+CREATE INDEX IF NOT EXISTS idx_notifications_user_email ON notifications(user_email);
+CREATE INDEX IF NOT EXISTS idx_notifications_read ON notifications(read);
+CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_email, read);
+
+-- Create trigger for notifications updated_at
+DROP TRIGGER IF EXISTS update_notifications_updated_at ON notifications;
+CREATE TRIGGER update_notifications_updated_at
+    BEFORE UPDATE ON notifications
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();

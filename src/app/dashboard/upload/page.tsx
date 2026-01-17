@@ -55,11 +55,161 @@ const DashboardUpload = () => {
     setUser(currentUser);
   }, [router]);
 
+  // Upload function - uploads files and updates status
+  const handleUploadClick = async () => {
+    const pendingFiles = files.filter((f) => f.status === 'pending');
+    
+    if (pendingFiles.length === 0) {
+      toast.info("No files to upload");
+      return;
+    }
+
+    const currentUser = getCurrentUser();
+    if (!currentUser) {
+      toast.error("User not authenticated");
+      return;
+    }
+
+    // Update files to uploading status
+    setFiles((prev) =>
+      prev.map((f) =>
+        pendingFiles.some(pf => pf.id === f.id)
+          ? { ...f, status: 'uploading' as const, progress: 0 }
+          : f
+      )
+    );
+
+    const { createSubmission } = await import('@/lib/db-client');
+    
+    // Upload files with progress updates
+    const submissionResults = await Promise.allSettled(
+      pendingFiles.map(async (uploadedFile) => {
+        // Simulate progress updates
+        const progressSteps = [20, 40, 60, 80];
+        for (const progress of progressSteps) {
+          await new Promise(resolve => setTimeout(resolve, 150));
+          setFiles((prev) =>
+            prev.map((f) =>
+              f.id === uploadedFile.id ? { ...f, progress } : f
+            )
+          );
+        }
+
+        const fullFileData = files.find(f => f.id === uploadedFile.id);
+        const preview = fullFileData?.preview || uploadedFile.preview;
+        
+        let validPreview: string | undefined = undefined;
+        if (preview) {
+          if (uploadedFile.type === 'image' && preview.startsWith('data:image')) {
+            validPreview = preview;
+          } else if (uploadedFile.type === 'video' && preview.startsWith('data:video')) {
+            validPreview = preview;
+          } else if (uploadedFile.type === 'audio' && preview.startsWith('data:audio')) {
+            validPreview = preview;
+          } else if (uploadedFile.type === 'document' && preview.startsWith('data:') && preview.length < 2000000) {
+            validPreview = preview;
+          }
+        }
+        
+        // Update to 90% before actual upload
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.id === uploadedFile.id ? { ...f, progress: 90 } : f
+          )
+        );
+
+        const result = await createSubmission({
+          id: uploadedFile.id,
+          userEmail: currentUser.email,
+          fileName: uploadedFile.file.name,
+          fileType: uploadedFile.type,
+          fileSize: uploadedFile.file.size,
+          status: 'pending',
+          preview: validPreview,
+        });
+
+        // Update to 100% after upload
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.id === uploadedFile.id ? { ...f, progress: 100 } : f
+          )
+        );
+
+        return result;
+      })
+    );
+
+    // Update file statuses based on results
+    const successes: string[] = [];
+    const failures: string[] = [];
+
+    submissionResults.forEach((result, index) => {
+      const fileId = pendingFiles[index].id;
+      if (result.status === 'fulfilled') {
+        successes.push(fileId);
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.id === fileId ? { ...f, status: 'success' as const, progress: 100 } : f
+          )
+        );
+      } else {
+        failures.push(fileId);
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.id === fileId ? { ...f, status: 'error' as const } : f
+          )
+        );
+      }
+    });
+
+    // Show toast notifications
+    if (successes.length > 0) {
+      toast.success("Upload Successful!", {
+        description: `${successes.length} file(s) uploaded successfully${failures.length > 0 ? ` (${failures.length} failed)` : ''}`,
+        duration: 5000,
+      });
+    }
+    
+    if (failures.length > 0) {
+      submissionResults.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          const failure = result as PromiseRejectedResult;
+          toast.error(`Upload failed: ${pendingFiles[index].file.name}`, {
+            description: failure.reason?.message || 'Unknown error',
+            duration: 5000,
+          });
+        }
+      });
+    }
+  };
+
   const getFileType = (file: File): 'image' | 'audio' | 'video' | 'document' => {
     const type = file.type.toLowerCase();
+    const fileName = file.name.toLowerCase();
+    
+    // Check MIME type first
     if (type.startsWith('image/')) return 'image';
     if (type.startsWith('audio/')) return 'audio';
     if (type.startsWith('video/')) return 'video';
+    
+    // Fallback to file extension if MIME type is missing or generic
+    if (fileName.endsWith('.jpg') || fileName.endsWith('.jpeg') || 
+        fileName.endsWith('.png') || fileName.endsWith('.gif') || 
+        fileName.endsWith('.webp') || fileName.endsWith('.bmp')) {
+      return 'image';
+    }
+    if (fileName.endsWith('.mp3') || fileName.endsWith('.wav') || 
+        fileName.endsWith('.aac') || fileName.endsWith('.ogg') || 
+        fileName.endsWith('.flac') || fileName.endsWith('.m4a')) {
+      return 'audio';
+    }
+    if (fileName.endsWith('.mp4') || fileName.endsWith('.mov') || 
+        fileName.endsWith('.avi') || fileName.endsWith('.mkv') || 
+        fileName.endsWith('.webm') || fileName.endsWith('.flv')) {
+      return 'video';
+    }
+    
+    // Default to document (includes PDF, JSON, CSV, DOC, DOCX, etc.)
     return 'document';
   };
 
@@ -69,15 +219,31 @@ const DashboardUpload = () => {
     }
 
     const allowedTypes = [
-      'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp',
-      'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/aac', 'audio/ogg',
-      'video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska',
-      'application/pdf', 'application/json', 'text/csv',
+      'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/bmp',
+      'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/aac', 'audio/ogg', 'audio/flac', 'audio/x-m4a',
+      'video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska', 'video/webm',
+      'application/pdf', 'application/json', 'text/csv', 'text/plain',
       'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
     ];
 
-    if (!allowedTypes.includes(file.type.toLowerCase())) {
-      return { valid: false, error: `File type ${file.type} is not supported` };
+    const fileName = file.name.toLowerCase();
+    const fileExtension = fileName.substring(fileName.lastIndexOf('.'));
+    const allowedExtensions = [
+      '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp',
+      '.mp3', '.wav', '.aac', '.ogg', '.flac', '.m4a',
+      '.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv',
+      '.pdf', '.json', '.csv', '.txt',
+      '.doc', '.docx'
+    ];
+
+    // Check MIME type first
+    const mimeTypeValid = file.type && allowedTypes.includes(file.type.toLowerCase());
+    
+    // If MIME type is missing or not in list, check file extension
+    const extensionValid = allowedExtensions.includes(fileExtension);
+
+    if (!mimeTypeValid && !extensionValid) {
+      return { valid: false, error: `File type ${file.type || 'unknown'} is not supported. Supported: Images, Audio, Video, PDF, Documents` };
     }
 
     return { valid: true };
@@ -103,35 +269,57 @@ const DashboardUpload = () => {
 
   const handleFiles = async (fileList: FileList) => {
     const newFiles: UploadedFile[] = [];
+    const invalidFiles: string[] = [];
+    const fileTypeCounts: { [key: string]: number } = { image: 0, audio: 0, video: 0, document: 0 };
 
+    // Process all files
     for (let i = 0; i < fileList.length; i++) {
       const file = fileList[i];
       const validation = validateFile(file);
 
       if (!validation.valid) {
-        toast.error("File Validation Failed", {
-          description: `${file.name}: ${validation.error}`,
-        });
+        invalidFiles.push(`${file.name}: ${validation.error}`);
         continue;
       }
 
       const fileType = getFileType(file);
       const preview = await createPreview(file, fileType);
 
+      // Generate unique ID using timestamp, random number, and index
+      const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${i}`;
+
       newFiles.push({
-        id: `${Date.now()}-${i}`,
+        id: uniqueId,
         file,
         type: fileType,
         progress: 0,
         status: 'pending',
         preview,
       });
+
+      fileTypeCounts[fileType]++;
     }
 
+    // Show validation errors if any
+    if (invalidFiles.length > 0) {
+      toast.error(`${invalidFiles.length} file(s) failed validation`, {
+        description: invalidFiles.slice(0, 3).join(', ') + (invalidFiles.length > 3 ? '...' : ''),
+        duration: 5000,
+      });
+    }
+
+    // Add valid files and show success message
     if (newFiles.length > 0) {
       setFiles((prev) => [...prev, ...newFiles]);
-      toast.success(`${newFiles.length} file(s) added`, {
-        description: "Files are ready to upload",
+      
+      const typeSummary = Object.entries(fileTypeCounts)
+        .filter(([_, count]) => count > 0)
+        .map(([type, count]) => `${count} ${type}${count > 1 ? 's' : ''}`)
+        .join(', ');
+
+      toast.success(`${newFiles.length} file(s) added successfully`, {
+        description: typeSummary ? `Types: ${typeSummary}` : "Files are ready to upload",
+        duration: 4000,
       });
     }
   };
@@ -206,12 +394,50 @@ const DashboardUpload = () => {
     setIsUploading(true);
     const currentUser = getCurrentUser();
 
+    // Show upload start notification with file count breakdown
+    const fileTypeBreakdown = pendingFiles.reduce((acc, file) => {
+      acc[file.type] = (acc[file.type] || 0) + 1;
+      return acc;
+    }, {} as { [key: string]: number });
+    
+    const breakdownText = Object.entries(fileTypeBreakdown)
+      .map(([type, count]) => `${count} ${type}${count > 1 ? 's' : ''}`)
+      .join(', ');
+
+    toast.info(`Uploading ${pendingFiles.length} file(s)...`, {
+      description: breakdownText,
+      duration: 3000,
+    });
+
     try {
-      const uploadPromises = pendingFiles.map((file) => uploadFile(file));
+      // Update all files to uploading status with progress
+      setFiles((prev) =>
+        prev.map((f) =>
+          pendingFiles.some(pf => pf.id === f.id)
+            ? { ...f, status: 'uploading' as const, progress: 10 }
+            : f
+        )
+      );
+
+      // Simulate upload progress for all files
+      const uploadPromises = pendingFiles.map(async (file) => {
+        // Update progress gradually
+        for (let progress = 20; progress <= 90; progress += 20) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+          setFiles((prev) =>
+            prev.map((f) =>
+              f.id === file.id ? { ...f, progress } : f
+            )
+          );
+        }
+        return uploadFile(file);
+      });
+      
       await Promise.all(uploadPromises);
 
       const { createSubmission } = await import('@/lib/db-client');
       
+      // Create submissions for all files in parallel
       const submissionResults = await Promise.allSettled(
         pendingFiles.map(async (uploadedFile) => {
           const fullFileData = files.find(f => f.id === uploadedFile.id);
@@ -242,34 +468,71 @@ const DashboardUpload = () => {
         })
       );
 
+      // Update all files to success status
+      setFiles((prev) =>
+        prev.map((f) =>
+          pendingFiles.some(pf => pf.id === f.id)
+            ? { ...f, status: 'success' as const, progress: 100 }
+            : f
+        )
+      );
+
       const failures = submissionResults.filter(r => r.status === 'rejected');
+      const successes = submissionResults.filter(r => r.status === 'fulfilled').length;
+      
       if (failures.length > 0) {
         console.error('Some submissions failed:', failures);
-        failures.forEach((failure: any) => {
+        // Mark failed files
+        failures.forEach((failure: any, index) => {
+          const failedFile = pendingFiles[index];
+          if (failedFile) {
+            setFiles((prev) =>
+              prev.map((f) =>
+                f.id === failedFile.id ? { ...f, status: 'error' as const } : f
+              )
+            );
+          }
           if (failure.reason) {
-            toast.error(`Failed to save: ${failure.reason.message || 'Unknown error'}`);
+            toast.error(`Failed to save: ${failure.reason.message || 'Unknown error'}`, {
+              duration: 5000,
+            });
           }
         });
       }
       
-      const successes = submissionResults.filter(r => r.status === 'fulfilled').length;
       if (successes > 0) {
         console.log(`Successfully saved ${successes} file(s) to database`);
         toast.success("Upload Successful!", {
-          description: `${successes} file(s) uploaded successfully`,
+          description: `${successes} file(s) uploaded successfully${failures.length > 0 ? ` (${failures.length} failed)` : ''}`,
+          duration: 5000,
         });
         
-        setFiles([]);
-        setIsUploading(false);
-        router.push('/dashboard/dataset-preview');
+        // Clear files after a short delay to show success state
+        setTimeout(() => {
+          setFiles([]);
+          setIsUploading(false);
+          router.push('/dashboard/dataset-preview');
+        }, 1500);
       } else {
+        setIsUploading(false);
         throw new Error('All submissions failed');
       }
     } catch (error) {
       console.error('Upload error:', error);
       setIsUploading(false);
+      
+      // Mark all pending files as error
+      setFiles((prev) =>
+        prev.map((f) =>
+          pendingFiles.some(pf => pf.id === f.id)
+            ? { ...f, status: 'error' as const }
+            : f
+        )
+      );
+      
       toast.error("Upload Failed", {
         description: "An error occurred during upload. Please try again.",
+        duration: 5000,
       });
     }
   };
@@ -359,7 +622,10 @@ const DashboardUpload = () => {
                 <p className="text-gray-600 text-sm text-center leading-relaxed">
                   {isDragging
                     ? 'Drop files here to upload'
-                    : 'Drag and drop files here or click to select files'}
+                    : 'Drag and drop files (Images, PDFs, Audio, Video) or click to select files'}
+                </p>
+                <p className="text-gray-500 text-xs text-center mt-1">
+                  Select files and click Upload to proceed
                 </p>
               </div>
               <input
@@ -381,21 +647,12 @@ const DashboardUpload = () => {
                   Select Files
                 </Button>
                 <Button
-                  onClick={handleUpload}
+                  onClick={handleUploadClick}
                   className="bg-blue-600 hover:bg-blue-700 text-white font-medium px-6"
-                  disabled={isUploading || files.length === 0 || files.every((f) => f.status !== 'pending')}
+                  disabled={files.length === 0 || files.every((f) => f.status !== 'pending')}
                 >
-                  {isUploading ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Uploading...
-                    </>
-                  ) : (
-                    <>
-                      <UploadIcon className="mr-2 h-4 w-4" />
-                      Upload
-                    </>
-                  )}
+                  <UploadIcon className="mr-2 h-4 w-4" />
+                  Upload
                 </Button>
               </div>
             </CardContent>
@@ -404,25 +661,8 @@ const DashboardUpload = () => {
           {files.length > 0 && (
             <Card className="mb-6">
               <CardHeader>
-                <CardTitle className="flex items-center justify-between">
-                  <span>Selected Files ({files.length})</span>
-                  <Button
-                    onClick={handleUpload}
-                    disabled={isUploading || files.length === 0 || files.every((f) => f.status !== 'pending')}
-                    className="bg-blue-600 hover:bg-blue-700 text-white"
-                  >
-                    {isUploading ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Uploading...
-                      </>
-                    ) : (
-                      <>
-                        <UploadIcon className="mr-2 h-4 w-4" />
-                        Upload
-                      </>
-                    )}
-                  </Button>
+                <CardTitle>
+                  Selected Files ({files.length})
                 </CardTitle>
               </CardHeader>
               <CardContent>
@@ -507,10 +747,11 @@ const DashboardUpload = () => {
               </CardHeader>
               <CardContent>
                 <ul className="space-y-2 text-sm text-gray-600">
-                  <li>• Images: JPG, PNG, GIF, WEBP</li>
-                  <li>• Audio: MP3, WAV, AAC, OGG</li>
-                  <li>• Video: MP4, MOV, AVI, MKV</li>
-                  <li>• Documents: PDF, DOC, DOCX, JSON, CSV</li>
+                  <li>• Images: JPG, PNG, GIF, WEBP, BMP</li>
+                  <li>• Audio: MP3, WAV, AAC, OGG, FLAC</li>
+                  <li>• Video: MP4, MOV, AVI, MKV, WEBM</li>
+                  <li>• Documents: PDF, DOC, DOCX, JSON, CSV, TXT</li>
+                  <li className="font-semibold text-blue-600 mt-2">• Multiple files can be selected at once</li>
                 </ul>
               </CardContent>
             </Card>
@@ -525,6 +766,7 @@ const DashboardUpload = () => {
                   <li>• All files are encrypted during upload</li>
                   <li>• Files are validated before processing</li>
                   <li>• You can track submission status in real-time</li>
+                  <li className="font-semibold text-blue-600 mt-2">• Mix different file types (PDF + Images) in one upload</li>
                 </ul>
               </CardContent>
             </Card>

@@ -164,10 +164,15 @@ const AdminRegistration = () => {
 
       // Validate access code (in production, this should be validated against a secure backend)
       // For now, we'll use a simple validation
-      const validAccessCodes = ['ADMIN2024', 'SUPER2024', 'VALIDATOR2024']; // This should be stored securely
-      if (!validAccessCodes.includes(formData.accessCode.toUpperCase())) {
+      const accessCodeUpper = formData.accessCode.toUpperCase();
+      const accessCodeLower = formData.accessCode.toLowerCase();
+      const validAccessCodes = ['ADMIN2024', 'SUPER2024', 'VALIDATOR2024', 'SUPER2024', 'VALIDATOR']; // This should be stored securely
+      const validCodesLower = ['super2024', 'validator'];
+      
+      // Check both uppercase and lowercase versions
+      if (!validAccessCodes.includes(accessCodeUpper) && !validCodesLower.includes(accessCodeLower)) {
         toast.error("Invalid Access Code", {
-          description: "The provided admin access code is invalid. Please contact system administrator.",
+          description: "The provided admin access code is invalid. Please use 'super2024' for Regional Hub or 'validator' for Admin Dashboard.",
         });
         return;
       }
@@ -211,13 +216,41 @@ const AdminRegistration = () => {
         };
         saveRegisteredAdmin(localAdminData);
 
+        // Store access code for redirect logic
+        const accessCodeLower = formData.accessCode.toLowerCase();
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('admin_code', accessCodeLower);
+        }
+
+        // Determine redirect based on access code
+        let redirectPath = '/auth/admin-auth/login';
+        let redirectMessage = "Your admin account has been created. Redirecting to login...";
+        
+        if (accessCodeLower === 'super2024') {
+          // Auto-login and redirect to regional hub
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('current_admin', JSON.stringify(localAdminData));
+            localStorage.setItem('is_admin_authenticated', 'true');
+          }
+          redirectPath = '/regional-hub';
+          redirectMessage = "Registration successful! Redirecting to Regional Hub...";
+        } else if (accessCodeLower === 'validator') {
+          // Auto-login and redirect to admin dashboard
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('current_admin', JSON.stringify(localAdminData));
+            localStorage.setItem('is_admin_authenticated', 'true');
+          }
+          redirectPath = '/admin-dashboard';
+          redirectMessage = "Registration successful! Redirecting to Admin Dashboard...";
+        }
+
         toast.success("Admin Registration Successful!", {
-          description: "Your admin account has been created in the database. Redirecting to login...",
+          description: redirectMessage,
         });
         
-        // Redirect to admin login after a short delay
+        // Redirect based on access code
         setTimeout(() => {
-          router.push('/auth/admin-auth/login');
+          router.push(redirectPath);
         }, 2000);
       } catch (error: any) {
         console.error('Error registering admin:', error);
@@ -485,7 +518,7 @@ const AdminRegistration = () => {
                   </p>
                 )}
                 <p className="text-gray-500 text-xs mt-1">
-                  Contact system administrator for the access code
+                  Use "super2024" for Regional Hub access or "validator" for Admin Dashboard access
                 </p>
               </div>
 
